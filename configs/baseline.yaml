@@ -1,0 +1,8 @@
+# Six comparisons share the same parse and the same selected source units.
+views: [ast, cfg, cpg]
+profiles: [general, maintenance]
+discovery_max_packs: 24
+pack_tokens: 4500
+batch_packs: 2
+neighbor_limit: 3
+graph_nodes_per_pack: 100

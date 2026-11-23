@@ -1,0 +1,15 @@
+{
+  "note": "人工维护的概念级参考答案；不参与模型输入。不能用概念召回代替实例正确率。",
+  "concepts": [
+    {"name": "设备", "aliases": ["Device", "设备对象"]},
+    {"name": "泵", "aliases": ["Pump"]},
+    {"name": "部件", "aliases": ["Component", "设备部件"]},
+    {"name": "监测读数", "aliases": ["Reading", "监测指标", "温度读数"]},
+    {"name": "告警", "aliases": ["Alarm", "报警"]},
+    {"name": "故障", "aliases": ["FaultCode", "故障码"]},
+    {"name": "维护任务", "aliases": ["MaintenanceTask", "运维任务"]},
+    {"name": "维护策略", "aliases": ["MaintenancePlanner", "维护计划器"]}
+  ],
+  "forbidden_claims": ["真实现场已发生过热故障", "TEST-PUMP 是现场资产", "Logger 就是告警业务概念"],
+  "manual_checks": ["条件-动作规则具有源码依据", "配置实体与现场实体明确区分", "网络 Device 与设备 Device 不因同名自动合并"]
+}

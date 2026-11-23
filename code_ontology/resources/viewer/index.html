@@ -1,0 +1,30 @@
+<!doctype html>
+<html lang="zh-CN">
+<head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>Code Atlas · 代码本体工作台</title><link rel="stylesheet" href="/style.css"></head>
+<body>
+<aside class="sidebar">
+  <div class="brand"><span class="brand-icon">◈</span><div>CODE ATLAS<small>代码业务本体工作台</small></div></div>
+  <div class="side-label">工作区</div>
+  <nav aria-label="页面导航">
+    <button class="nav active" data-page="graph"><span>◎</span> 本体图谱</button>
+    <button class="nav" data-page="records"><span>▤</span> 知识断言</button>
+    <button class="nav" data-page="compare"><span>▥</span> 实验对比</button>
+    <button class="nav" data-page="stages"><span>⇢</span> 阶段追踪</button>
+    <button class="nav" data-page="review"><span>✓</span> 人工评审</button>
+  </nav>
+  <div class="side-note"><span class="status-dot"></span> 本地产物 · 只读浏览<small>不调用模型，不触发抽取。<br>评审保存在浏览器，可导出。</small></div>
+</aside>
+<div class="workspace">
+  <header><div class="breadcrumb">Workspace <span>/</span> Ontology Explorer</div><div class="header-actions"><span class="tag">OFFLINE READY</span><button id="refresh" class="button subtle">刷新产物</button></div></header>
+  <main>
+    <div class="heading"><div><div class="eyebrow">EVIDENCE · STRUCTURE · EVALUATION</div><h1 id="page-title">从代码中看见业务结构</h1><p id="page-subtitle">探索概念与关系，沿证据回到源码。</p></div><span id="run-status" class="tag">等待选择实验</span></div>
+    <div class="run-bar"><label for="run-select">当前实验</label><select id="run-select" aria-label="选择实验"></select><span id="model-label" class="muted"></span></div>
+    <div id="notice" class="notice" role="status" hidden></div>
+    <div id="metrics" class="metric-grid"></div>
+    <div id="page-content"></div>
+  </main>
+  <footer>Code Atlas <span>JSON / JSONL 产物浏览器 · 证据可定位不等于语义已验证</span></footer>
+</div>
+<div id="toast" role="status" hidden></div>
+<script src="/app.js" defer></script>
+</body></html>

@@ -1,0 +1,8 @@
+# Configuration-defined records, not verified physical assets.
+devices:
+  - id: PUMP-CONFIG-01
+    type: Pump
+    components: [bearing, motor]
+    temperature_threshold: 85
+    temperature_unit: C
+    maintenance_interval_hours: 720

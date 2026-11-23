@@ -1,0 +1,8 @@
+cmake_minimum_required(VERSION 3.16)
+project(maintenance_demo LANGUAGES CXX)
+set(CMAKE_CXX_STANDARD 17)
+add_library(maintenance src/device.cpp src/monitor.cpp src/maintenance.cpp)
+target_include_directories(maintenance PUBLIC include)
+target_compile_definitions(maintenance PRIVATE ENABLE_REMOTE=1)
+add_executable(demo src/main.cpp)
+target_link_libraries(demo PRIVATE maintenance)

@@ -1,0 +1,1 @@
+Discover the repository's business domain from the supplied evidence. Infer useful concepts, hierarchy, relationships and data properties. Do not assume an equipment-maintenance domain. Separate namesakes and do not create business concepts from infrastructure alone. State uncertainties in unresolved.

@@ -1,0 +1,129 @@
+from pathlib import Path
+import csv
+import json
+import tempfile
+import threading
+import unittest
+from urllib.error import HTTPError
+from urllib.request import Request, urlopen
+
+from code_ontology.review import sample, summarize
+from code_ontology.util import file_hash, write_json, write_jsonl
+from code_ontology.viewer import ArtifactStore, make_server
+
+
+class ViewerReviewTests(unittest.TestCase):
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory()
+        self.root = Path(self.temp.name)
+        self.snap = self.root / "snapshot"
+        self.run = self.snap / "runs" / "demo" / "cpg" / "maintenance"
+        self.source = self.snap / "source" / "设备.cpp"
+        self.source.parent.mkdir(parents=True)
+        self.source.write_text("// 设备\nint threshold = 85;\n", encoding="utf-8")
+        self.schema = {"classes": [{"id": "device", "name": "设备", "definition": "设备定义", "parents": [], "aliases": ["Device"], "evidence_ids": ["ev1"]}],
+                       "relations": [], "properties": [], "unresolved": []}
+        write_json(self.snap / "manifest.json", {"snapshot_id": "snapshot", "repo": "demo", "files": [{"file": "设备.cpp"}]})
+        write_json(self.run / "run_manifest.json", {"settings": {"model": "test-real-name"}, "stages": {"execution": {"state": "success"}}})
+        write_json(self.run / "metrics.json", {"status": "success", "entities": 1})
+        write_json(self.run / "final" / "schema.json", self.schema)
+        write_jsonl(self.run / "final" / "entities.jsonl", [{"id": "e", "name": "设备A", "type_id": "device", "scope": "example", "basis": "direct", "evidence_ids": ["ev1"]}])
+        write_jsonl(self.run / "evidence.jsonl", [{"evidence_id": "ev1", "file": "设备.cpp", "start_line": 2, "end_line": 2, "source_sha256": file_hash(self.source)}])
+        self.store = ArtifactStore(self.root)
+        self.rid = self.store.listing()["runs"][0]["id"]
+
+    def tearDown(self):
+        self.temp.cleanup()
+
+    def fingerprint(self):
+        return {str(p.relative_to(self.snap)): file_hash(p) for p in self.snap.rglob("*") if p.is_file()}
+
+    def test_read_only_records_evidence_and_partial_runs(self):
+        before = self.fingerprint()
+        detail = self.store.detail(self.rid)
+        self.assertEqual(detail["schema"]["classes"][0]["name"], "设备")
+        self.assertIn("device", detail["schema_record_ids"]["classes"])
+        self.assertEqual(self.store.records(self.rid, "entities", query="不存在")["total"], 0)
+        self.assertEqual(self.store.records(self.rid, "entities", query="设备A")["total"], 1)
+        self.assertEqual(self.store.records(self.rid, "entities", offset=1)["rows"], [])
+        evidence = self.store.evidence(self.rid, "ev1")
+        self.assertTrue(evidence["source_hash_matches"])
+        self.assertTrue(evidence["lines"][1]["highlight"])
+        self.assertEqual(before, self.fingerprint())
+        self.source.write_text("// changed\nint threshold=90;\n", encoding="utf-8")
+        self.assertFalse(self.store.evidence(self.rid, "ev1")["source_hash_matches"])
+        write_json(self.run / "run_manifest.json", {"stages": {"execution": {"state": "failed"}}})
+        self.assertEqual(self.store.listing()["runs"][0]["status"], "failed")
+
+    def test_path_and_query_boundaries(self):
+        with self.assertRaises(KeyError):
+            self.store.evidence(self.rid, "../../.env")
+        with self.assertRaises(ValueError):
+            self.store.records(self.rid, "../.env")
+        with self.assertRaises(ValueError):
+            self.store.records(self.rid, "entities", limit=1001)
+        with self.assertRaises(ValueError):
+            self.store.artifact(self.rid, "../.env")
+        write_jsonl(self.run / "evidence.jsonl", [{"evidence_id": "bad", "file": "../../.env", "start_line": 1, "end_line": 1}])
+        with self.assertRaises(ValueError):
+            self.store.evidence(self.rid, "bad")
+
+    def test_http_static_api_and_no_write_routes(self):
+        server = make_server(self.root, 0)
+        thread = threading.Thread(target=server.serve_forever, daemon=True)
+        thread.start()
+        base = f"http://127.0.0.1:{server.server_port}"
+        before = self.fingerprint()
+        try:
+            with urlopen(base + "/") as r:
+                self.assertIn("CODE ATLAS", r.read().decode())
+                self.assertIn("default-src 'self'", r.headers["Content-Security-Policy"])
+            with urlopen(base + "/app.js") as r:
+                self.assertIn("function showEvidence", r.read().decode())
+            with urlopen(base + "/api/runs") as r:
+                self.assertEqual(len(json.load(r)["runs"]), 1)
+            with urlopen(base + "/api/records?id=" + self.rid + "&kind=entities&limit=1") as r:
+                self.assertEqual(json.load(r)["total"], 1)
+            for path in ("/.env", "/api/run?id=../../", "/unknown"):
+                with self.assertRaises(HTTPError):
+                    urlopen(base + path)
+            with self.assertRaises(HTTPError) as e:
+                urlopen(Request(base + "/api/run", data=b"{}", method="POST"))
+            self.assertEqual(e.exception.code, 501)
+            self.assertEqual(before, self.fingerprint())
+        finally:
+            server.shutdown(); server.server_close(); thread.join()
+
+    def test_sampling_and_human_summary(self):
+        csv_path = self.root / "reviews" / "labels.csv"
+        result = sample(self.run, csv_path, per_kind=1, seed=42)
+        self.assertEqual(result["rows"], 2)
+        with self.assertRaises(ValueError):
+            sample(self.run, csv_path)
+        with csv_path.open(encoding="utf-8-sig", newline="") as f:
+            reader = csv.DictReader(f); fields = reader.fieldnames; rows = list(reader)
+        for row in rows:
+            row.update(verdict="correct", evidence_support="supported", domain_relevant="yes")
+        with csv_path.open("w", encoding="utf-8-sig", newline="") as f:
+            writer = csv.DictWriter(f, fieldnames=fields); writer.writeheader(); writer.writerows(rows)
+        summary = summarize(csv_path, self.root / "summary.json")
+        self.assertEqual(summary["assertion_sample"]["strict_sample_precision"], 1.0)
+        self.assertEqual(summary["missing_sample_rows"], 0)
+        with self.assertRaises(ValueError):
+            summarize(csv_path, csv_path)
+        rows[0]["payload_json"] = "{}"
+        with csv_path.open("w", encoding="utf-8-sig", newline="") as f:
+            writer = csv.DictWriter(f, fieldnames=fields); writer.writeheader(); writer.writerows(rows)
+        with self.assertRaises(ValueError):
+            summarize(csv_path, self.root / "bad.json")
+
+    def test_interactive_reviews_are_marked_nonrandom(self):
+        path = self.root / "interactive.json"
+        write_json(path, {"sampling_method": "interactive_nonrandom", "annotations": [
+            {"record_id": "entity:1", "kind": "entities", "verdict": "uncertain", "evidence_support": "unsupported"},
+            {"record_id": "entity:2", "kind": "entities", "verdict": "partial", "evidence_support": "supported"}]})
+        result = summarize(path, self.root / "interactive-summary.json")
+        self.assertEqual(result["sampling_method"], "interactive_nonrandom")
+        self.assertEqual(result["assertion_sample"]["judged_rows"], 1)
+        self.assertEqual(result["assertion_sample"]["strict_sample_precision"], 0)
+        self.assertEqual(result["assertion_sample"]["unresolved_or_unreviewed"], 1)

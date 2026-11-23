@@ -1,0 +1,19 @@
+views: [ast, cfg, cpg]
+profiles: [general, maintenance]
+exclude: [.git, .venv, build, dist, outputs, third_party, vendor, node_modules, tests, test, gold.json]
+include: []
+max_files: 0
+max_file_bytes: 2097152
+encoding_fallback: gb18030
+compile_commands: null
+includes: []
+defines: []
+joern_timeout: 600
+# Conservative UTF-8 byte upper bound; full requests are also budget-checked.
+pack_tokens: 4500
+neighbor_limit: 3
+graph_nodes_per_pack: 100
+discovery_max_packs: 24
+batch_packs: 2
+merge_max_rounds: 8
+prompt_dir: null

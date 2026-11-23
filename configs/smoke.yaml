@@ -1,0 +1,7 @@
+views: [cpg]
+profiles: [maintenance]
+discovery_max_packs: 8
+pack_tokens: 4500
+batch_packs: 2
+neighbor_limit: 3
+graph_nodes_per_pack: 100
