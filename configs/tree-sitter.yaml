@@ -1,0 +1,5 @@
+# No Joern/Java required. Syntax AST only; general × maintenance = two groups.
+parser_backend: tree-sitter
+views: [ast]
+profiles: [general, maintenance]
+discovery_max_packs: 24

@@ -5,9 +5,9 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "code-ontology-baseline"
 version = "0.1.0"
-description = "Evidence-grounded C++ business ontology extraction with Joern and an OpenAI-compatible LLM"
+description = "Evidence-grounded C/C++ ontology extraction with Joern or Tree-sitter and an OpenAI-compatible LLM"
 requires-python = ">=3.10"
-dependencies = ["openai>=1.50,<3", "python-dotenv>=1,<2", "PyYAML>=6,<7", "pydantic>=2.8,<3", "ijson>=3.3,<4"]
+dependencies = ["openai>=1.50,<3", "python-dotenv>=1,<2", "PyYAML>=6,<7", "pydantic>=2.8,<3", "ijson>=3.3,<4", "tree-sitter>=0.26,<0.27", "tree-sitter-c>=0.24,<0.25", "tree-sitter-cpp>=0.23,<0.24"]
 
 [project.scripts]
 code-ontology = "code_ontology.cli:main"
@@ -16,4 +16,4 @@ code-ontology = "code_ontology.cli:main"
 include = ["code_ontology*"]
 
 [tool.setuptools.package-data]
-code_ontology = ["resources/**/*.txt", "resources/*.yaml", "resources/*.sc", "resources/viewer/*.html", "resources/viewer/*.css", "resources/viewer/*.js"]
+code_ontology = ["resources/**/*.txt", "resources/*.yaml", "resources/*.sc", "resources/viewer/*.html", "resources/viewer/*.css", "resources/viewer/*.js", "resources/workbench/*.html", "resources/workbench/*.css", "resources/workbench/*.js"]

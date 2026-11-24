@@ -1,0 +1,62 @@
+<!doctype html>
+<html lang="zh-CN">
+<head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Code Atlas · 步骤工作台</title><link rel="stylesheet" href="/style.css"></head>
+<body>
+<aside class="sidebar">
+  <div class="brand"><span>◈</span><div>CODE ATLAS<small>代码本体 · 步骤工作台</small></div></div>
+  <div class="side-label">工作空间</div>
+  <select id="workspace-select" aria-label="工作区"></select>
+  <button id="new-workspace" class="button ghost">＋ 新建工作区</button>
+  <nav>
+    <button class="nav active" data-page="pipeline">01 <span>分阶段执行</span></button>
+    <button class="nav" data-page="artifacts">02 <span>输入与产物</span></button>
+    <button class="nav" data-page="prompts">03 <span>提示词与模型</span></button>
+    <button class="nav" data-page="ontology">04 <span>本体与人工审核</span></button>
+  </nav>
+  <div class="side-foot"><i></i> 本机运行 · 文件驱动<small>阶段任务与源码证据完整保留。<br>模型调用按当前配置执行。</small></div>
+</aside>
+<div class="workspace">
+  <header><span>WORKSPACE <b>/</b> STAGE WORKBENCH</span><button id="refresh" class="button">刷新状态</button></header>
+  <main>
+    <div class="heading"><div class="eyebrow">SOURCE → STRUCTURE → ONTOLOGY</div><h1>让抽取过程，每一步都看得见。</h1><p>选择目录，逐阶段运行，检查输入、产物与源码依据。</p></div>
+    <div id="notice" class="notice" hidden role="status"></div>
+    <details id="settings" class="panel" open>
+      <summary><span>工作区设置</span><small id="workspace-caption">从一个代码仓库开始</small></summary>
+      <form id="settings-form" class="form-grid">
+        <label>工作区名称<input name="name" placeholder="设备运维模块"></label>
+        <label>实验 ID<input name="experiment" value="workbench-01" required pattern="[\w\-]+"></label>
+        <label class="span2">输入代码仓库<div class="path-field"><input name="repo" required><button type="button" data-browse="repo" class="button">选择目录</button></div></label>
+        <label class="span2">输出根目录<div class="path-field"><input name="out" required><button type="button" data-browse="out" class="button">选择目录</button></div></label>
+        <label>YAML 策略<div class="path-field"><input name="config" required><button type="button" data-browse="config" class="button">浏览</button></div></label>
+        <label>模型环境文件<div class="path-field"><input name="env_file" required><button type="button" data-browse="env_file" class="button">浏览</button></div></label>
+        <label>图视图<select name="view"><option value="cpg">综合 CPG</option><option value="ast">AST</option><option value="cfg">CFG</option></select></label>
+        <label>领域提示词<select name="profile"><option value="maintenance">设备运维 maintenance</option><option value="general">通用 general</option></select></label>
+        <label class="span2">已有快照（可留空，先执行扫描）<div class="path-field"><input name="snapshot" placeholder="扫描后自动填入；也可选择已有快照"><button type="button" id="find-snapshots" class="button">查找快照</button></div><select id="snapshot-select" hidden aria-label="已有快照"></select></label>
+        <label class="span2">人工参考 gold 文件（可选）<div class="path-field"><input name="gold" placeholder="不配置则跳过参考概念匹配"><button type="button" data-browse="gold" class="button">浏览</button></div></label>
+        <div class="form-actions span2"><span>连接读取 .env，策略读取 YAML；密钥不会显示在页面。</span><button class="button primary" type="submit">保存工作区</button></div>
+      </form>
+    </details>
+    <section id="page-pipeline" class="page">
+      <div id="overview" class="metrics"></div>
+      <div class="section-head"><div><h2>逐阶段执行</h2><p>先检查输入，再执行当前步骤；已有快照可从中间继续。</p></div><span id="active-badge" class="badge">等待选择工作区</span></div>
+      <div class="pipeline-layout"><div id="stages" class="stages"><div class="empty">保存工作区后即可开始，不需要已有实验产物。</div></div>
+        <aside class="panel stage-detail"><div class="panel-head"><div><small>SELECTED STAGE</small><h2 id="detail-title">阶段详情</h2></div></div><div id="detail-body" class="panel-body empty">选择左侧阶段，查看输入、输出与执行计划。</div></aside></div>
+      <div class="panel task-panel"><div class="panel-head"><div><small>LIVE EXECUTION</small><h2>任务日志与历史</h2></div><div class="actions"><select id="job-select" aria-label="任务记录"></select><button id="cancel-job" class="button danger" disabled>停止任务</button><button id="ack-job" class="button" hidden>确认已检查残留进程</button></div></div><div id="job-meta" class="job-meta">执行任务后，日志会持续更新；关闭页面不会停止任务。</div><div class="toolbar"><button class="button" data-attempt="task.json">本次配置记录</button><button class="button" data-attempt="policy.yaml">冻结策略</button><button class="button" data-attempt="input-schema.json">输入 Schema 副本</button><button class="button" data-attempt="metrics.json">本次指标副本</button></div><pre id="attempt-content" class="json" hidden></pre><pre id="console" class="console">尚无任务。</pre></div>
+    </section>
+    <section id="page-artifacts" class="page" hidden>
+      <div class="section-head"><div><h2>检查输入与输出</h2><p>JSONL 按记录分页，文本按字节分段；原始文件完整保留在磁盘。</p></div></div>
+      <div class="panel"><div class="toolbar"><select id="artifact-root" aria-label="产物根"></select><input id="artifact-path" placeholder="相对路径，例如 prepared/cpg/packs.jsonl"><button id="open-artifact" class="button primary">打开</button><button id="artifact-up" class="button">上级目录</button></div><div class="toolbar"><input id="artifact-query" placeholder="JSONL 内容搜索（每次检查最多 1000 条）"><button id="search-artifact" class="button">搜索</button><button id="preview-next" class="button" disabled>下一段</button><span id="artifact-meta" class="muted"></span></div><div id="artifact-content" class="artifact-content empty">保存工作区后选择文件。</div></div>
+    </section>
+    <section id="page-prompts" class="page" hidden>
+      <div class="section-head"><div><h2>提示词与有效配置</h2><p>编辑领域指导时保存为副本；固定 schema 需要显式更新或使用新实验。</p></div></div>
+      <div class="two-col"><div class="panel"><div class="panel-head"><h2>当前模型与处理策略</h2></div><pre id="effective-config" class="json"></pre></div><div class="panel"><div class="toolbar"><select id="prompt-stage"><option value="discover">发现 discover</option><option value="merge">合并 merge</option><option value="extract">实例 extract</option></select><button id="save-prompt" class="button primary">保存领域提示词副本</button></div><div class="panel-body"><label>领域提示词（可编辑）<textarea id="prompt-editor" rows="12"></textarea></label><details><summary>查看完整提示词与 JSON 契约</summary><pre id="prompt-rendered" class="json"></pre></details><p class="muted">通用契约保留。新配置切换后，下游任务会标记需核对版本。</p></div></div></div>
+    </section>
+    <section id="page-ontology" class="page" hidden><div class="section-head"><div><h2>本体、断言与源码证据</h2><p>发现 Schema 后即可查看概念、继承、关系和属性；页面评审保存在浏览器，请及时导出。</p></div><div class="actions"><select id="ontology-mode" aria-label="本体展示版本"><option value="schema">当前发现 Schema</option><option value="final">最终本体与实例</option></select><button id="reload-viewer" class="button">重新加载产物</button></div></div><iframe id="viewer" title="本体产物浏览器"></iframe></section>
+  </main>
+  <footer>CODE ATLAS <span>步骤执行 · 输入输出 · 源码证据</span></footer>
+</div>
+<dialog id="path-dialog"><div class="panel-head"><h2 id="path-title">选择路径</h2><button type="button" id="close-path" class="button">关闭</button></div><div class="toolbar"><input id="browse-path"><button id="browse-go" class="button">转到</button><button id="browse-up" class="button">上级</button></div><div id="browse-list" class="browser-list"></div><div class="toolbar"><span id="browse-status" class="muted"></span><button id="use-directory" class="button primary">选择此目录</button></div></dialog>
+<dialog id="plan-dialog"><div class="panel-head"><h2 id="plan-title">执行计划</h2><button id="close-plan" class="button">关闭</button></div><div class="panel-body"><p id="plan-note"></p><div id="plan-inputs"></div><details><summary>实际执行命令</summary><pre id="plan-command" class="json"></pre></details><label id="update-schema-label" hidden><input id="update-schema" type="checkbox"> 显式更新已有 Schema（改变后需重新抽取实例）</label><div class="actions"><button id="execute-plan" class="button primary">执行当前阶段</button></div></div></dialog>
+<div id="toast" hidden role="status"></div>
+<script src="/app.js" defer></script>
+</body></html>

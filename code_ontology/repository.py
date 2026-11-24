@@ -71,6 +71,16 @@ def snapshot(repo: Path, out: Path | None, policy: dict, joern_home: str = "") -
     parser_config["distribution"] = sorted(p.name for p in libs.glob("*semanticcpg*")) if libs.is_dir() else []
     parser_config["export_script"] = file_hash(RESOURCE / "export.sc")
     parser_config["compile_hash"] = compile_hash
+    from .config import Settings
+    from .parsing import select_backend
+    parser = select_backend(policy, Settings(joern_home=joern_home))
+    if parser["backend"] == "tree-sitter":
+        # Keep legacy Joern identities, but never mix AST-only caches with a Joern snapshot.
+        parser_config["backend"] = "tree-sitter"
+        parser_config["versions"] = parser["versions"]
+        parser_config["adapter_hash"] = parser["adapter_hash"]
+        parser_config.pop("distribution", None)
+        parser_config.pop("export_script", None)
     identity = [{"file": r["file"], "sha256": r["sha256"]} for r in records]
     sid = digest({"files": identity, "parse": parser_config, "format": 1})
     dest = root / sid
@@ -123,7 +133,7 @@ def snapshot(repo: Path, out: Path | None, policy: dict, joern_home: str = "") -
         "format_version": 1, "tool_version": __version__, "created_at": now(), "snapshot_id": sid,
         "repo": str(repo), "source_dir": str(source), "files": records, "skipped": skipped,
         "parse_config": parser_config, "compile_commands": str(compile_out) if compile_out else None,
-        "warnings": warnings, "stages": {},
+        "warnings": warnings + parser["limitations"], "stages": {}, "parser": parser,
     })
     write_json(dest / "policy.json", policy)
     return dest

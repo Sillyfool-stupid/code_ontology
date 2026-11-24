@@ -1,5 +1,7 @@
 # 六组基线实验与人工审核操作规程
 
+> 无 Joern 时可使用内置 [Tree-sitter AST 后端](TREE_SITTER.md)：`configs/tree-sitter.yaml`。仅支持 AST，实验为两种 profile 共两组；本文 Joern 的 CFG/CPG、六组与 CPG 产物说明只适用于 Joern 后端。
+
 本文配合 [内网 Agent 手册](INTRANET_AGENT_GUIDE.md) 使用。Agent 负责运行、整理产物、生成审核表和统计；人工负责读源码、判断语义和签署结论。填写报告可复制 [空白评审报告模板](templates/BASELINE_REVIEW_REPORT.md)。以下命令使用 CMD，先激活虚拟环境，之后统一用 `python`。
 
 ## 1. 必须完成的六组是什么

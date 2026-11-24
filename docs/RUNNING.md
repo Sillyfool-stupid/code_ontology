@@ -1,5 +1,7 @@
 # 从零到界面的完整运行步骤
 
+> 无 Joern 时可使用内置 [Tree-sitter AST 后端](TREE_SITTER.md)：`configs/tree-sitter.yaml`。仅支持 AST，实验为两种 profile 共两组；本文 Joern 的 CFG/CPG、六组与 CPG 产物说明只适用于 Joern 后端。
+
 所有命令在项目根目录执行。下面以 Windows PowerShell 为主。当前机器已创建 `.venv`、配置本机 DeepSeek 并有成功示例输出，可以直接从第 2 节开始。
 
 使用 Windows 命令提示符 CMD 时，请改看 **[CMD 完整运行说明](RUNNING_CMD.md)**；两种终端的变量、引号和续行语法不同。

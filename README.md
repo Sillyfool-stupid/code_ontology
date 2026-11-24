@@ -1,14 +1,37 @@
 # 代码业务本体抽取基线
 
-输入一个 C/C++ 仓库路径，使用 **Joern → AST/CFG/综合 CPG 证据包 → LLM 发现 schema → 合并固定 schema → 实例抽取 → 校验和对比报告**。
+输入一个 C/C++ 仓库路径，使用 **Joern（AST/CFG/综合 CPG）或 Tree-sitter（AST）→ 证据包 → LLM 发现 schema → 合并固定 schema → 实例抽取 → 校验和对比报告**。
+
+**没有 Joern 时可直接使用 Tree-sitter，无需 Java 或编译器。** 默认 `parser_backend: auto` 优先 Joern，找不到工具时使用 Tree-sitter AST；也可用 `--parser-backend tree-sitter` 强制选择。安装依赖后最短命令：
+
+```bat
+call .venv\Scripts\activate.bat
+python -m pip install -r requirements.lock.txt
+python -m pip install -e .
+python -m code_ontology doctor --parser-backend tree-sitter --no-llm
+python -m code_ontology parse --repo examples/maintenance --config configs/tree-sitter.yaml
+python -m code_ontology run --repo examples/maintenance --config configs/tree-sitter.yaml --profile maintenance --experiment ts-smoke-01 --env-file .env
+```
+
+最后一条使用 `.env` 中的模型；前面的诊断和解析不调用模型。完整安装、独立阶段、AST 两组实验、工作台与产物说明见 **[Tree-sitter 使用方法](docs/TREE_SITTER.md)**。Tree-sitter 只提供语法结构，不产生 CFG、CPG、调用解析或数据流。
 
 **内网交给 Agent 接手时：先读 [AGENTS.md](AGENTS.md)，再读 [内网 Agent 使用与接手手册](docs/INTRANET_AGENT_GUIDE.md)。手册末尾附有可直接复制的接手提示词。**
 
-支持通用 `general` 和设备运维 `maintenance` 两种提示词。三种视图独立处理和测试，共六组组合。
+支持通用 `general` 和设备运维 `maintenance` 两种提示词。Joern 三种视图共六组组合；Tree-sitter AST 共两组组合，报告按实际后端列出可用组合。
 
 六组逐项清单、CMD 批量检查命令、人工源码审核判据与指标口径见 **[六组基线与人工审核规程](docs/BASELINE_REVIEW.md)**；结果可填写 **[评审报告模板](docs/templates/BASELINE_REVIEW_REPORT.md)**。
 
 当前版本交付 JSON/JSONL、Markdown 与本地浏览界面；RDF、图数据库、完整 CMake 求值和数据流推理不在基线中。
+
+**分阶段工作台**：选择输入/输出目录，用按钮逐步扫描、Joern/Tree-sitter 抽取、准备模型输入、发现 Schema、抽取实例、校验和审核；可查看每步产物、日志与真实模型请求。使用项目自带虚拟环境，在 CMD 启动：
+
+```bat
+cd /d "D:\code\f47-work\code-ontology"
+call .venv\Scripts\activate.bat
+python -m code_ontology.workbench --port 8766
+```
+
+浏览器打开 `http://127.0.0.1:8766`。操作步骤、输入输出、六组实验和恢复方法见 **[工作台使用说明](docs/WORKBENCH.md)**。不需要新增 Python 依赖或 npm 构建。
 
 新增独立的本地只读界面，支持本体 / 实例子图、断言分页、源码证据、实验对比、阶段追踪和人工评审；不改变现有抽取逻辑。图数据库和 RDF/OWL 推理仍未实现。
 
@@ -23,7 +46,7 @@
 
 ## 1. 环境和安装
 
-Python 3.10+；Joern 4 / flatgraph。外网实测 Joern 4.0.684。Java 使用与所安装 Joern 发行版兼容的版本；本机实测 Java 25.0.5.1。Joern 不是 Python 包，需要独立安装并配置 `JOERN_HOME` 或 PATH。
+Python 3.10+；Tree-sitter 依赖已纳入安装清单。选择 Joern 后端时需独立安装 Joern 4 / flatgraph，并配置 `JOERN_HOME` 或 PATH；外网实测 Joern 4.0.684 与 Java 25.0.5.1。使用与所安装 Joern 发行版兼容的 Java。
 
 Windows PowerShell，在本项目目录运行：
 
@@ -66,7 +89,7 @@ LLM_MAX_OUTPUT_TOKENS=4096
 ## 3. 最短运行路径
 
 ```powershell
-# 不调用模型，只检查 Joern 和输出能力
+# 不调用模型，检查所选解析器（auto 优先 Joern，缺失则 Tree-sitter）
 .\.venv\Scripts\python.exe -m code_ontology doctor --no-llm
 
 # 填好 .env 后检查真实模型连接与 JSON 输出

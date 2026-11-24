@@ -27,6 +27,7 @@ def run():
     if not args.snapshot and not args.real_joern:
         ap.error("Use --snapshot <parsed directory> or --real-joern")
     policy = load_policy()
+    policy["parser_backend"] = "joern"  # This script explicitly validates Joern's three views.
     if args.snapshot:
         dest = args.snapshot.resolve()
     else:

@@ -9,7 +9,8 @@ from pydantic import BaseModel
 
 from .config import PROJECT, RESOURCE, load_policy, load_settings
 from .console import configure_console
-from .joern import executable, invoke, normalize, parse
+from .joern import executable, invoke, normalize
+from .parsing import BACKENDS, parse_repository, parser_views, select_backend, snapshot_parser
 from .llm import LLM
 from .models import Ontology, Extraction
 from .pipeline import Pipeline, comparison, report_run, supported_ids
@@ -19,7 +20,7 @@ from .util import iter_jsonl, now, read_json, write_json, write_jsonl, write_tex
 
 
 def parser():
-    root = argparse.ArgumentParser(description="Joern + LLM 代码业务本体抽取基线")
+    root = argparse.ArgumentParser(description="Joern / Tree-sitter + LLM 代码业务本体抽取")
     sub = root.add_subparsers(dest="command", required=True)
     commands = {}
     for name in ("scan", "parse", "prepare", "discover", "extract", "run", "experiment", "doctor", "report", "validate", "evaluate", "import-graph"):
@@ -27,6 +28,7 @@ def parser():
         p.add_argument("--env-file")
         p.add_argument("--config", help="YAML policy; unknown keys are rejected")
         commands[name] = p
+        p.add_argument("--parser-backend", choices=BACKENDS, help="auto: prefer Joern, fall back to Tree-sitter AST")
     for name in ("scan", "parse", "run", "experiment"):
         p = commands[name]
         p.add_argument("--repo", type=Path, required=True)
@@ -68,10 +70,22 @@ def split_choice(text, defaults, allowed):
     return list(dict.fromkeys(values))
 
 
-def doctor(settings, output: Path, no_llm: bool):
+def doctor(settings, output: Path, no_llm: bool, policy=None):
     output = output.resolve()
     result = {"created_at": now(), "python": sys.version, "settings": settings.public(), "checks": {}}
-    for name in ("c2cpg", "joern"):
+    info = select_backend(policy or load_policy(), settings)
+    result["parser"] = info
+    if info["backend"] == "tree-sitter":
+        try:
+            from .treesitter import parsers
+            engines = parsers()
+            for language, engine in engines.items():
+                if engine.parse(b"int probe(void) { return 0; }").root_node.has_error:
+                    raise RuntimeError(f"{language} grammar probe failed")
+            result["checks"]["tree-sitter"] = {"ok": True, "versions": info["versions"]}
+        except Exception as e:
+            result["checks"]["tree-sitter"] = {"ok": False, "error": str(e)}
+    for name in (("c2cpg", "joern") if info["backend"] == "joern" else ()):
         try:
             path = executable(settings, name)
             log = output / f"{name}.help.log"
@@ -105,6 +119,10 @@ def doctor(settings, output: Path, no_llm: bool):
 
 def validate(dest: Path, view: str, run_dir: Path | None):
     verify_sources(dest)
+    if view not in snapshot_parser(dest)["available_views"]:
+        raise ValueError("Snapshot has no such view; Tree-sitter supports --view ast only")
+    if not (dest / "prepared" / view / "packs.jsonl").is_file():
+        raise ValueError("No prepared evidence packs; run prepare first")
     errors = []
     packs = list(iter_jsonl(dest / "prepared" / view / "packs.jsonl"))
     allowed = set()
@@ -164,6 +182,8 @@ def main(argv=None):
     try:
         settings = load_settings(args.env_file)
         policy = load_policy(args.config)
+        if args.parser_backend:
+            policy["parser_backend"] = args.parser_backend
         for key in ("include", "exclude", "max_files"):
             value = getattr(args, key, None)
             if value is not None:
@@ -172,7 +192,7 @@ def main(argv=None):
             raise ValueError("max_files cannot be negative")
         command = args.command
         if command == "doctor":
-            return doctor(settings, args.out, args.no_llm)
+            return doctor(settings, args.out, args.no_llm, policy)
         if command == "report":
             if args.run_dir:
                 report_run(args.run_dir.resolve()); print(args.run_dir.resolve() / "report.md")
@@ -191,6 +211,8 @@ def main(argv=None):
         if command == "scan":
             return 0
         if command == "import-graph":
+            if snapshot_parser(dest)["backend"] == "tree-sitter":
+                raise ValueError("import-graph expects Joern-compatible graph contracts; create a scan --parser-backend joern snapshot first")
             import ijson
             def rows(path):
                 if path.suffix.lower() == ".jsonl":
@@ -209,9 +231,15 @@ def main(argv=None):
             return validate(dest, args.view, args.run_dir)
         views = split_choice(getattr(args, "views", None), policy["views"], {"ast", "cfg", "cpg"})
         if command in {"parse", "run", "experiment"}:
-            parse(dest, settings, policy, views, args.force_parse)
+            info = snapshot_parser(dest)
+            effective = parser_views(info, views)
+            print(f"PARSER={info['backend']} VIEWS={','.join(effective)} ({info.get('reason', '')})", flush=True)
+            if effective != views:
+                print("Tree-sitter supports AST only; requested CFG/CPG views are replaced with AST.", flush=True)
+            views = effective
+            parse_repository(dest, settings, policy, views, args.force_parse)
             if command == "parse":
-                print("Joern parse and view exports complete")
+                print(f"{info['backend']} parse and view exports complete")
                 return 0
         if command == "prepare":
             print(prepare(dest, args.view, policy)); return 0

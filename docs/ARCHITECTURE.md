@@ -1,5 +1,7 @@
 # 实现说明与数据契约
 
+> 无 Joern 时可使用内置 [Tree-sitter AST 后端](TREE_SITTER.md)：`configs/tree-sitter.yaml`。仅支持 AST，实验为两种 profile 共两组；本文 Joern 的 CFG/CPG、六组与 CPG 产物说明只适用于 Joern 后端。
+
 ## 阶段边界
 
 1. `repository.snapshot` 扫描、排除、编码转换并建立不可变源码快照。

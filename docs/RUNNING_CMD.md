@@ -1,5 +1,10 @@
 # Windows CMD 完整运行说明
 
+## 无 Joern 环境入口
+
+使用 `configs/tree-sitter.yaml`，CLI 与工作台均支持内置 C/C++ AST 解析。完整 CMD 命令见 [Tree-sitter 使用方法](TREE_SITTER.md)。本文后续 CFG/CPG 和六组示例需要 Joern；Tree-sitter 请使用 `--view ast`，实验为 AST 两组。
+
+
 适用于命令提示符 CMD。所有命令按行执行，不要复制 PowerShell 的 `$py`、`&` 或反引号。先激活虚拟环境，后续统一使用 `python`。每次新开 CMD 都需要重新激活。项目在入口处设置 UTF-8 终端输出，文件读写也显式指定编码，无需每次加编码参数。
 
 ## 1. 进入项目并检查环境
@@ -25,6 +30,16 @@ notepad .env
 ```
 
 在新机器填写内网模型地址、密钥、模型名、合法的上下文与输出预算、JOERN_HOME；Joern 与兼容 Java 单独安装。配置含义见 RUNNING.md 与 README.md。
+
+### 用网页逐步执行
+
+当前终端已激活项目 `.venv` 时：
+
+```bat
+python -m code_ontology.workbench --port 8766
+```
+
+保持终端运行，浏览器打开 `http://127.0.0.1:8766`，设置输入/输出目录、YAML 和 `.env` 后保存工作区，再按阶段执行。模型按钮会调用配置的模型。完整操作、日志、六组与审核见 [工作台说明](WORKBENCH.md)。原只读 viewer 在 8765 的用法保持不变。
 
 ## 2. 运行一个完整示例
 

@@ -1,5 +1,25 @@
 # 验证记录
 
+## 2026-11-24：Tree-sitter AST 后端
+
+本项目 `.venv`，Python 3.10；tree-sitter 0.26.1、tree-sitter-c 0.24.2、tree-sitter-cpp 0.23.4。`python -m unittest discover -s tests -v` **42 项通过**（46.248 秒）；包含真实 C/C++ 语法解析、命名空间与函数声明/定义、函数指针排除、全局与宏证据、中文路径、语法错误报告、自动后端选择、快照隔离、缓存、CLI 两组模拟模型闭环与原功能回归。`python -m pip check` 和工作台 JS `node --check` 通过。
+
+`python scripts/check_workbench.py --tree-sitter --out outputs/tree-sitter-verification`：doctor、scan、parse、prepare、discover、extract、validate、evaluate、report、sample、summarize、extract 续跑和 experiment 均成功。真实 grammar 解析 maintenance 示例的 **8 个 C/C++ 文件，0 个语法错误**，AST 两组均成功；本地模拟 API 共 **161 次请求**，同配置实例续跑额外请求 **0**。快照为 `outputs/tree-sitter-verification/artifacts/e603a3916387bbbf1511`，实验 ID 和阶段任务 ID 见输出根目录 `verification.json`。复跑检查脚本会使用新实验 ID，保留已有审核文件。
+
+`python scripts/check_demo.py --real-joern`：Joern 三视图 × 两种 profile 的六组模拟模型回归通过，独立证据校验通过，续跑新增请求 0；快照 `outputs/real-joern/711dc9d4bca4fba1d07f`，记录为该目录 `fixture_validation.json`。
+
+本次仅使用本地模拟模型验证流程与数据契约，未调用用户真实模型，未做人工语义评审。工作台通过真实子进程、产物验收和 HTTP/静态资源测试，新增页面提示未做浏览器视觉验收。Tree-sitter 只支持语法 AST，不提供 CFG/CPG、调用解析或数据流。新用法见 [TREE_SITTER.md](TREE_SITTER.md)。
+
+## 2026-11-24：分阶段工作台
+
+分支 `feature/stage-workbench`，解释器为本项目 `.venv`。完整 `python -m unittest discover -s tests -v` 共 **38 项通过**（41.177 秒），包含原 CLI/viewer/review 的 27 项与新增工作台的 11 项测试。Windows 进程树取消及异常子进程清理在正常进程权限下实测通过；模拟 API 不调用真实模型。Python compileall、工作台 JavaScript `node --check` 通过。新增 Schema 展示测试覆盖 discover 后直接读取概念与源码、更新后区分发现 Schema 和最终 Schema、不混用旧实例。
+
+`python scripts/check_workbench.py --real-joern`：真实 Joern 经工作台的子进程编排完成扫描、三视图解析、prepare、discover、extract、validate、evaluate、report、sample、summarize、extract 续跑、experiment 六组。全部阶段成功，六组齐全，模拟 API 共 356 次请求，同配置实例续跑新增请求 0。解释器记录、阶段任务 ID 与快照见 `outputs/workbench-verification/verification.json`。模拟结果不可用于语义评价。本次未调用用户真实模型。
+
+自动覆盖配置冻结、Schema 复用提示、源码变化中止 Joern、分页/大记录截断、越界/环境文件拒绝、密钥脱敏、HTTP 同源/会话、任务失败状态与异常恢复。浏览器预览授权被拒绝，未完成真实浏览器渲染和点击验收。工作台使用方法见 [WORKBENCH.md](WORKBENCH.md)。
+
+---
+
 验证日期：2026-11-23。以下区分真实模型抽取与模拟接口测试；当前结果未经完整人工语义评审。
 
 ## 环境
