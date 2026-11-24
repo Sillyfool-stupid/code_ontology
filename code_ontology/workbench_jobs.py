@@ -17,7 +17,7 @@ import uuid
 
 import yaml
 
-from .config import PROJECT, RESOURCE, Settings, load_policy, load_settings
+from .config import PROJECT, RESOURCE, Settings, load_policy, load_settings, configuration_sources
 from .pipeline import prompt
 from .parsing import select_backend, snapshot_parser
 from .prepare import __file__ as prepare_implementation
@@ -27,8 +27,9 @@ from .workbench_files import Preview, checked, listing
 STAGES = [
     ("doctor", "检查环境", False), ("connection", "测试模型连接", True),
     ("scan", "扫描仓库", False), ("parse", "解析并导出结构", False),
-    ("prepare", "生成模型输入包", False), ("discover", "发现并合并 Schema", True),
-    ("extract", "抽取实例与规则", True), ("validate", "校验结果", False),
+    ("prepare", "生成模型输入包", False), ("discover-local", "局部 Schema 提取", True),
+    ("merge-schema", "合并 Schema（可独立恢复）", True), ("discover", "发现并合并 Schema（兼容）", True),
+    ("extract", "抽取实例与规则", True), ("finalize", "归并实例产物", False), ("validate", "校验结果", False),
     ("evaluate", "匹配参考概念", False), ("report", "生成对比报告", False),
     ("sample", "生成审核表", False), ("summarize", "汇总人工审核", False),
     ("experiment", "运行六组基线", True),
@@ -136,15 +137,15 @@ class Workbench:
                 raise ValueError("视图/profile 无效")
             if not re.fullmatch(r"[\w-]{1,80}", experiment):
                 raise ValueError("实验 ID 只允许字母、数字、下划线、短横线")
-            config = Path(fields.get("config") or self.project / "configs" / "smoke.yaml").resolve()
+            config = Path(fields["config"]).resolve() if fields.get("config") else None
             envfile = Path(fields.get("env_file") or self.project / ".env").resolve()
-            policy = load_policy(str(config))
+            policy = load_policy(str(config) if config else None, str(envfile))
             settings = load_settings(str(envfile))
             info = snapshot_parser(Path(snap)) if snap else select_backend(policy, settings)
             if view not in info["available_views"]:
                 view = "ast"
             w = {"id": wid, "name": str(fields.get("name") or experiment)[:100], "repo": str(repo), "out": str(out),
-                 "config": str(config), "env_file": str(envfile), "snapshot": snap,
+                 "config": str(config) if config else "", "env_file": str(envfile), "snapshot": snap,
                  "view": view, "profile": profile, "experiment": experiment,
                  "gold": str(Path(fields["gold"]).resolve()) if fields.get("gold") else "",
                  "updated_at": now()}
@@ -152,7 +153,7 @@ class Workbench:
             return self.describe(wid)
 
     def settings(self, w):
-        policy = load_policy(w["config"])
+        policy = load_policy(w["config"] or None, w["env_file"])
         # Exclude control files when the input repository contains the workbench itself.
         if within(self.state, Path(w["repo"])):
             relative = self.state.relative_to(Path(w["repo"])).as_posix()
@@ -181,11 +182,18 @@ class Workbench:
             return digest({"snapshot": w["snapshot"], "policy": {k: policy[k] for k in scan_keys}, "parser": select_backend(policy, settings), "joern_home": settings.joern_home})
         if stage == "prepare":
             return digest({**base, "graph": graph, "pack_policy": {k: policy[k] for k in pack_keys}})
-        if stage in {"discover", "extract"}:
+        if stage in {"discover", "discover-local", "merge-schema", "finalize", "extract"}:
             selected_prompts = {k: v for k, v in prompts.items() if k.startswith("common/") or k.startswith(w["profile"] + "/")}
+            effective = settings.public()
+            if stage in {"extract", "finalize", "discover-local", "merge-schema"}:
+                stage_name = {"discover-local": "discover", "merge-schema": "merge", "finalize": "extract", "extract": "extract"}[stage]
+                effective = settings.for_stage(stage_name).public()
+                selected_prompts = {k: v for k, v in selected_prompts.items() if k.startswith("common/") or k.endswith(f"/{stage_name}.txt")}
             if stage == "extract":
                 selected_prompts = {k:v for k,v in selected_prompts.items() if "/discover." not in k and "/merge." not in k}
-            return digest({**base, "packs": packs, "schema": schema, "settings": settings.public(),
+            return digest({**base, "packs": packs, "schema": schema if stage in {"extract", "finalize"} else None,
+                           "local": stamp(Path(w["snapshot"]) / "runs" / w["experiment"] / w["view"] / w["profile"] / "schema/local-manifest.json") if stage == "merge-schema" and w["snapshot"] else None,
+                           "settings": effective, "output_language": policy["output_language"],
                            "prompts": selected_prompts, "pack_policy": {k:policy[k] for k in pack_keys},
                            "discovery": [policy["discovery_max_packs"],policy["batch_packs"],policy["merge_max_rounds"]]})
         if stage in {"validate", "evaluate", "report", "sample", "summarize"}:
@@ -196,7 +204,7 @@ class Workbench:
         return digest({**base, "policy": {**policy, "prompt_dir": "<content>"}, "settings": settings.public(), "prompts": prompts})
 
     def roots(self, w):
-        roots = {"repo": Path(w["repo"]), "config": Path(w["config"]).parent,
+        roots = {"repo": Path(w["repo"]), "config": Path(w["config"]).parent if w["config"] else Path(w["env_file"]).parent,
                  "doctor": self.state / "diagnostics" / w["id"], "reviews": Path(w["out"]) / "reviews" / w["experiment"]}
         if w["snapshot"]:
             roots["snapshot"] = Path(w["snapshot"])
@@ -227,15 +235,15 @@ class Workbench:
         r = self.roots(w)
         snap, run = r.get("snapshot"), r.get("run")
         required = []
-        if stage in {"parse", "prepare", "discover", "extract", "validate", "evaluate", "report", "sample", "summarize"} and not snap:
+        if stage in {"parse", "prepare", "discover", "discover-local", "merge-schema", "finalize", "extract", "validate", "evaluate", "report", "sample", "summarize"} and not snap:
             return ["请先扫描/解析或选择已有快照"]
-        if snap and stage in {"prepare", "discover", "extract", "validate"} and w["view"] not in snapshot_parser(snap)["available_views"]:
+        if snap and stage in {"prepare", "discover", "discover-local", "merge-schema", "finalize", "extract", "validate"} and w["view"] not in snapshot_parser(snap)["available_views"]:
             return ["当前快照仅支持 AST，请保存工作区以切换视图"]
-        if stage in {"prepare", "discover", "extract"}:
+        if stage in {"prepare", "discover", "discover-local", "merge-schema", "finalize", "extract"}:
             required += [snap / "normalized" / w["view"] / "index.json"]
-        if stage in {"discover", "extract", "validate"}:
+        if stage in {"discover", "discover-local", "merge-schema", "finalize", "extract", "validate"}:
             required += [snap / "prepared" / w["view"] / "packs.jsonl"]
-        if stage in {"discover", "extract"} and snap:
+        if stage in {"discover", "discover-local", "merge-schema", "finalize", "extract"} and snap:
             prepared = snap / "prepared" / w["view"] / "index.json"
             graph_index = snap / "normalized" / w["view"] / "index.json"
             if prepared.is_file() and graph_index.is_file():
@@ -246,6 +254,10 @@ class Workbench:
                               "implementation": file_hash(Path(prepare_implementation)), "format": 1})
                 if read_json(prepared).get("key") != key:
                     return ["证据包与当前图/预算不一致，请先重新生成模型输入包"]
+        if stage == "merge-schema":
+            required += [run / "schema" / "local-manifest.json"]
+        if stage == "finalize":
+            required += [run / "extraction" / "manifest.json"]
         if stage == "extract":
             required += [run / "schema" / "schema.json"]
         if stage in {"validate", "evaluate", "sample"}:
@@ -274,6 +286,8 @@ class Workbench:
                                                                     or latest.get("schema_prompt_matches") is False))})
         roots = self.roots(w)
         return {"workspace": w, "settings": settings.public(), "policy": policy, "parser": info, "fingerprint": fingerprint,
+                "stage_settings": {s: settings.for_stage(s).public() for s in ("discover", "merge", "extract")},
+                "configuration_sources": configuration_sources(w["env_file"], w["config"] or None),
                 "stages": stages, "jobs": jobs, "roots": {k: str(v) for k, v in roots.items()},
                 "prompts": {stage: prompt(policy, w["profile"], stage) for stage in ("discover", "merge", "extract")},
                 "prompt_sources": {stage: (Path(policy.get("prompt_dir") or RESOURCE / "prompts") / w["profile"] / f"{stage}.txt").read_text(encoding="utf-8") for stage in ("discover", "merge", "extract")}}
@@ -288,7 +302,7 @@ class Workbench:
             inputs["固定源码清单"] = str(snap / "manifest.json")
         if snap and stage == "prepare":
             inputs["规范图索引"] = str(snap / "normalized" / w["view"] / "index.json")
-        if snap and stage in {"discover", "extract", "validate"}:
+        if snap and stage in {"discover", "discover-local", "merge-schema", "finalize", "extract", "validate"}:
             inputs["模型证据包"] = str(snap / "prepared" / w["view"] / "packs.jsonl")
         if run and stage == "extract":
             inputs["固定 Schema（执行时复制）"] = str(run / "schema/schema.json")
@@ -300,7 +314,7 @@ class Workbench:
             inputs["人工参考概念"] = w["gold"]
         if stage == "summarize":
             inputs["人工标签 CSV"] = str(r["reviews"] / f"{w['view']}-{w['profile']}.csv")
-        if stage in {"discover", "extract", "experiment"}:
+        if stage in {"discover", "discover-local", "merge-schema", "finalize", "extract", "experiment"}:
             inputs["实际提示词目录"] = str(Path(self.settings(w)[0].get("prompt_dir") or RESOURCE / "prompts"))
         return inputs
 
@@ -374,7 +388,7 @@ class Workbench:
 
     def _command(self, stage, w, config, envfile, options):
         args = [sys.executable, "-u", "-m", "code_ontology"]
-        common = ["--config", str(config), "--env-file", str(envfile)]
+        common = (["--config", str(config)] if config else []) + ["--env-file", str(envfile)]
         snap = w["snapshot"]
         run = self.roots(w).get("run")
         if stage in {"doctor", "connection"}:
@@ -390,10 +404,10 @@ class Workbench:
             return args
         if stage == "prepare":
             return args + [stage, "--snapshot", snap, "--view", w["view"]] + common
-        if stage in {"discover", "extract"}:
+        if stage in {"discover", "discover-local", "merge-schema", "finalize", "extract"}:
             args += [stage, "--snapshot", snap, "--view", w["view"], "--profile", w["profile"], "--experiment", w["experiment"]] + common
             if stage == "extract":
-                args += ["--schema", str(run / "schema" / "schema.json")]
+                args += ["--defer-finalize", "--schema", str(run / "schema" / "schema.json")]
             elif options.get("update_schema"):
                 args += ["--update-schema"]
             return args
@@ -418,7 +432,7 @@ class Workbench:
         return {"stage": stage, "label": s["label"], "model": s["model"], "blocked": s["blocked"],
                 "command": self._command(stage, d["workspace"], d["workspace"]["config"], d["workspace"]["env_file"], options or {}),
                 "inputs": s["inputs"], "fingerprint": self.fingerprint(d["workspace"], d["policy"], load_settings(d["workspace"]["env_file"]), stage),
-                "note": "仅执行当前阶段；discover/extract 会按原 CLI 核对/复用 prepare，extract 显式指定固定 schema。"}
+                "note": "局部提取与合并可独立运行；实例抽取后执行归并实例产物。discover 是保留的组合入口。"}
 
     def submit(self, wid, stage, options=None):
         options = options or {}
@@ -454,6 +468,13 @@ class Workbench:
             environment = dict(os.environ)
             for field, key in MODEL_ENV.items():
                 environment[key] = str(getattr(settings, field))
+            for stage_name in ("discover", "merge", "extract"):
+                overrides = settings.stage_overrides.get(stage_name, {})
+                for attr in ("context_tokens", "max_output_tokens", "timeout", "retries", "concurrency"):
+                    value = overrides.get(attr, "")
+                    suffix = MODEL_ENV[attr].removeprefix("LLM_")
+                    environment[f"LLM_{stage_name.upper()}_{suffix}"] = str(value)
+            environment["CO_FROZEN_POLICY"] = str(config.resolve())
             environment["PYTHONIOENCODING"] = "utf-8"
             j = {"id": jid, "workspace": wid, "stage": stage, "state": "queued", "created_at": now(),
                  "workspace_config": w, "settings": settings.public(), "fingerprint": plan["fingerprint"],
@@ -517,7 +538,13 @@ class Workbench:
             files = [snap / "prepared" / w["view"] / n for n in ("packs.jsonl", "index.json")]
         elif stage == "discover" and run:
             files = [run / "schema" / n for n in ("schema.json", "provenance.json", "selection.json")]
+        elif stage == "discover-local" and run:
+            files = [run / "schema/local-manifest.json", run / "schema/selection.json"]
+        elif stage == "merge-schema" and run:
+            files = [run / "schema/schema.json", run / "schema/merge-status.json", run / "schema/provenance.json"]
         elif stage == "extract" and run:
+            files = [run / "extraction/manifest.json", run / "extraction/selection.json"]
+        elif stage == "finalize" and run:
             files = [run / "metrics.json", run / "final/schema.json", run / "extraction/selection.json"]
             files += [run / "final" / f"{n}.jsonl" for n in ("entities", "relations", "attributes", "rules", "candidates")]
         elif stage in {"validate", "evaluate"} and run:
@@ -534,8 +561,12 @@ class Workbench:
             raise ValueError("命令结束但必要产物缺失：" + "; ".join(str(p) for p in files if not p.is_file()))
         if stage in {"doctor", "connection", "validate"} and not read_json(files[0]).get("ok"):
             raise ValueError("产物报告检查未通过")
-        if stage == "extract" and read_json(run / "metrics.json").get("status") != "success":
+        if stage == "finalize" and read_json(run / "metrics.json").get("status") != "success":
             raise ValueError("实例产物未全部成功，请检查 metrics 和失败记录")
+        if stage in {"discover-local", "merge-schema", "extract"}:
+            check = {"discover-local": "schema/local-manifest.json", "merge-schema": "schema/merge-status.json", "extract": "extraction/manifest.json"}[stage]
+            if read_json(run / check).get("state") != "success":
+                raise ValueError("阶段部分完成，请查看未完成任务")
 
     def _run(self, job):
         jid = job["id"]
@@ -548,7 +579,7 @@ class Workbench:
         output_lock = None
         p = None
         try:
-            frozen_policy = load_policy(job["command"][job["command"].index("--config") + 1]) if "--config" in job["command"] else None
+            frozen_policy = load_policy(job["command"][job["command"].index("--config") + 1], frozen=True) if "--config" in job["command"] else None
             frozen_settings = Settings(**{**job["settings"], "base_url": environment["OPENAI_BASE_URL"], "api_key": secret})
             with self.lock:
                 if self.job(jid)["state"] != "queued":
@@ -576,10 +607,14 @@ class Workbench:
                     log.write(line)
                     if line.startswith("SNAPSHOT="):
                         discovered = line.strip().split("=", 1)[1]
-                    match = re.search(r"TASK (discover|extract) (\d+)/(\d+) \((\d+) successful\)", line)
+                    match = re.search(r"TASK (discover|extract|merge) (\d+)/(\d+) \((\d+) successful\)", line)
                     if match:
                         self.update_job(jid, progress={"phase": match[1], "completed": int(match[2]),
                                                       "total": int(match[3]), "successful": int(match[4])})
+                    merge = re.search(r"MERGE round=(\d+) batch=(\d+)/(\d+)", line)
+                    if merge:
+                        self.update_job(jid, progress={"phase": f"merge round {merge[1]}", "completed": int(merge[2])-1,
+                                                      "total": int(merge[3]), "successful": int(merge[2])-1})
                     if line.startswith("RUN "):
                         self.update_job(jid, combination=line.strip()[4:])
             code = p.wait()
@@ -599,7 +634,7 @@ class Workbench:
             state = "succeeded" if code == 0 else "failed"
             if self.job(jid)["state"] == "cancelling":
                 state = "cancelled"
-            elif code and w["snapshot"] and job["stage"] in {"discover", "extract", "experiment"}:
+            elif code and w["snapshot"] and job["stage"] in {"discover", "discover-local", "merge-schema", "finalize", "extract", "experiment"}:
                 run = self.roots(w)["run"]
                 if job["stage"] == "experiment":
                     summary = Path(w["snapshot"]) / "runs" / w["experiment"] / "comparison.json"
@@ -611,20 +646,20 @@ class Workbench:
                         state = "partial"
             if state == "succeeded":
                 self._check_outputs(job["stage"], w)
+            if w["snapshot"]:
+                run = self.roots(w)["run"]
+                metrics = run / "metrics.json"
+                if job["stage"] in {"extract", "finalize", "experiment"} and metrics.is_file():
+                    write_json(Path(job["log"]).parent / "metrics.json", read_json(metrics))
+                if job["stage"] == "discover" and (run / "schema" / "provenance.json").is_file():
+                    actual = read_json(run / "schema" / "provenance.json")
+                    expected_prompt = digest(prompt(frozen_policy, w["profile"], "discover") + prompt(frozen_policy, w["profile"], "merge"))
+                    self.update_job(jid, schema_prompt_matches=actual.get("prompt_hash") == expected_prompt,
+                                    schema_note="固定 Schema 默认复用；提示词变动需要勾选更新 Schema 或新建实验")
             self.update_job(jid, state=state, exit_code=code, ended_at=now(),
                             artifact_status="current" if state == "succeeded" else "incomplete",
                             fingerprint=self.fingerprint(w, frozen_policy, frozen_settings, job["stage"])
                             if state == "succeeded" and frozen_policy else job["fingerprint"])
-            if w["snapshot"]:
-                run = self.roots(w)["run"]
-                metrics = run / "metrics.json"
-                if job["stage"] in {"extract", "experiment"} and metrics.is_file():
-                    write_json(Path(job["log"]).parent / "metrics.json", read_json(metrics))
-                if job["stage"] == "discover" and (run / "schema" / "provenance.json").is_file():
-                    actual = read_json(run / "schema" / "provenance.json")
-                    expected_prompt = digest(prompt(load_policy(job["command"][job["command"].index("--config") + 1]), w["profile"], "discover") + prompt(load_policy(job["command"][job["command"].index("--config") + 1]), w["profile"], "merge"))
-                    self.update_job(jid, schema_prompt_matches=actual.get("prompt_hash") == expected_prompt,
-                                    schema_note="固定 Schema 默认复用；提示词变动需要勾选更新 Schema 或新建实验")
         except Exception as e:
             # Keep the writer lock until an unexpectedly abandoned child has really exited.
             if p and p.poll() is None:

@@ -27,13 +27,13 @@
         <label>实验 ID<input name="experiment" value="workbench-01" required pattern="[\w\-]+"></label>
         <label class="span2">输入代码仓库<div class="path-field"><input name="repo" required><button type="button" data-browse="repo" class="button">选择目录</button></div></label>
         <label class="span2">输出根目录<div class="path-field"><input name="out" required><button type="button" data-browse="out" class="button">选择目录</button></div></label>
-        <label>YAML 策略<div class="path-field"><input name="config" required><button type="button" data-browse="config" class="button">浏览</button></div></label>
+        <label>YAML 策略（可选）<div class="path-field"><input name="config"><button type="button" data-browse="config" class="button">浏览</button></div></label>
         <label>模型环境文件<div class="path-field"><input name="env_file" required><button type="button" data-browse="env_file" class="button">浏览</button></div></label>
         <label>图视图<select name="view"><option value="cpg">综合 CPG</option><option value="ast">AST</option><option value="cfg">CFG</option></select></label>
         <label>领域提示词<select name="profile"><option value="maintenance">设备运维 maintenance</option><option value="general">通用 general</option></select></label>
         <label class="span2">已有快照（可留空，先执行扫描）<div class="path-field"><input name="snapshot" placeholder="扫描后自动填入；也可选择已有快照"><button type="button" id="find-snapshots" class="button">查找快照</button></div><select id="snapshot-select" hidden aria-label="已有快照"></select></label>
         <label class="span2">人工参考 gold 文件（可选）<div class="path-field"><input name="gold" placeholder="不配置则跳过参考概念匹配"><button type="button" data-browse="gold" class="button">浏览</button></div></label>
-        <div class="form-actions span2"><span>连接读取 .env，策略读取 YAML；密钥不会显示在页面。</span><button class="button primary" type="submit">保存工作区</button></div>
+        <div class="form-actions span2"><span>常用配置读取 .env；YAML 仅用于可选覆盖，密钥不会显示在页面。</span><button class="button primary" type="submit">保存工作区</button></div>
       </form>
     </details>
     <section id="page-pipeline" class="page">

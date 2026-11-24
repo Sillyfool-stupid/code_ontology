@@ -1,7 +1,8 @@
 from __future__ import annotations
 
 import os
-from dataclasses import dataclass, asdict
+from dataclasses import dataclass, asdict, field, replace
+import json
 from pathlib import Path
 
 import yaml
@@ -26,6 +27,12 @@ class Settings:
     joern_home: str = ""
     ca_bundle: str = ""
     thinking: str = "auto"
+    stage_overrides: dict = field(default_factory=dict)
+
+    def for_stage(self, stage):
+        result = replace(self, **self.stage_overrides.get(stage, {}), stage_overrides={})
+        validate_settings(result)
+        return result
 
     def public(self):
         data = asdict(self)
@@ -37,11 +44,15 @@ class Settings:
         return data
 
 
-def load_settings(env_file: str | None = None) -> Settings:
+def env_values(env_file=None):
     path = Path(env_file) if env_file else PROJECT / ".env"
     if env_file and not path.is_file():
         raise ValueError(f"Environment file not found: {path}")
-    values = {**(dotenv_values(path) if path.is_file() else {}), **os.environ}
+    return {**(dotenv_values(path) if path.is_file() else {}), **os.environ}
+
+
+def load_settings(env_file: str | None = None) -> Settings:
+    values = env_values(env_file)
     mapping = {
         "base_url": ("OPENAI_BASE_URL", str), "api_key": ("OPENAI_API_KEY", str),
         "model": ("OPENAI_MODEL", str), "timeout": ("LLM_TIMEOUT_SECONDS", float),
@@ -52,11 +63,26 @@ def load_settings(env_file: str | None = None) -> Settings:
         "thinking": ("LLM_THINKING", str),
     }
     result = Settings(**{k: cast(values[key]) for k, (key, cast) in mapping.items() if values.get(key) not in (None, "")})
+    for stage in ("discover", "merge", "extract"):
+        overrides = {}
+        for attr, suffix, cast in (("context_tokens", "CONTEXT_TOKENS", int), ("max_output_tokens", "MAX_OUTPUT_TOKENS", int),
+                                   ("timeout", "TIMEOUT_SECONDS", float), ("retries", "MAX_RETRIES", int), ("concurrency", "CONCURRENCY", int)):
+            value = values.get(f"LLM_{stage.upper()}_{suffix}")
+            if value not in (None, ""):
+                overrides[attr] = cast(value)
+        result.stage_overrides[stage] = overrides
     if not result.joern_home:
         import shutil
         found = shutil.which("joern.bat" if os.name == "nt" else "joern")
         if found:
             result.joern_home = str(Path(found).parent)
+    validate_settings(result)
+    for stage in result.stage_overrides:
+        result.for_stage(stage)
+    return result
+
+
+def validate_settings(result):
     if result.json_mode not in {"auto", "on", "off"}:
         raise ValueError("LLM_JSON_MODE must be auto, on or off")
     if result.thinking not in {"auto", "enabled", "disabled"}:
@@ -65,10 +91,24 @@ def load_settings(env_file: str | None = None) -> Settings:
         raise ValueError("Invalid LLM limits")
     if result.context_tokens <= result.max_output_tokens + 1000:
         raise ValueError("Context must leave at least 1000 input tokens")
-    return result
 
 
-def load_policy(path: str | None = None) -> dict:
+POLICY_ENV = {
+    "parser_backend": ("CO_PARSER", str), "views": ("CO_VIEW", lambda x: x.split(",")),
+    "profiles": ("CO_PROFILE", lambda x: x.split(",")), "output_language": ("CO_OUTPUT_LANGUAGE", str),
+    "include": ("CO_SCAN_INCLUDE", json.loads), "exclude": ("CO_SCAN_EXCLUDE", json.loads),
+    "max_files": ("CO_SCAN_MAX_FILES", int), "max_file_bytes": ("CO_SCAN_MAX_FILE_BYTES", int),
+    "includes": ("CO_INCLUDE_DIRS", json.loads), "defines": ("CO_DEFINES", json.loads),
+    "compile_commands": ("CO_COMPILE_COMMANDS", str), "prompt_dir": ("CO_PROMPT_DIR", str),
+    "joern_timeout": ("CO_PARSE_TIMEOUT_SECONDS", int), "pack_tokens": ("CO_PACK_BUDGET", int),
+    "graph_nodes_per_pack": ("CO_GRAPH_NODES_PER_PACK", int), "neighbor_limit": ("CO_NEIGHBOR_LIMIT", int),
+    "discovery_max_packs": ("CO_DISCOVERY_SAMPLE_LIMIT", int), "batch_packs": ("CO_DISCOVERY_BATCH_PACKS", int),
+    "merge_batch_items": ("CO_MERGE_BATCH_ITEMS", int), "merge_max_rounds": ("CO_MERGE_MAX_ROUNDS", int),
+    "recovery_max_depth": ("CO_RECOVERY_MAX_DEPTH", int),
+}
+
+
+def load_policy(path: str | None = None, env_file: str | None = None, frozen=False) -> dict:
     data = yaml.safe_load((RESOURCE / "default.yaml").read_text(encoding="utf-8"))
     if path:
         supplied = yaml.safe_load(Path(path).read_text(encoding="utf-8")) or {}
@@ -79,7 +119,24 @@ def load_policy(path: str | None = None) -> dict:
         for key in ("prompt_dir", "compile_commands"):
             if data.get(key):
                 data[key] = str((Path(path).resolve().parent / data[key]).resolve())
-    for key in ("pack_tokens", "graph_nodes_per_pack", "batch_packs", "merge_max_rounds", "joern_timeout", "max_file_bytes"):
+    values = env_values(env_file)
+    # Workbench jobs use an already resolved policy captured when submitted.
+    if frozen or path and os.environ.get("CO_FROZEN_POLICY") == str(Path(path).resolve()):
+        values = {}
+    for field_name, (key, cast) in POLICY_ENV.items():
+        if values.get(key) not in (None, ""):
+            data[field_name] = cast(values[key])
+            if field_name in {"prompt_dir", "compile_commands"}:
+                base = Path(env_file).resolve().parent if env_file else PROJECT
+                data[field_name] = str((base / data[field_name]).resolve())
+    mode = values.get("CO_DISCOVERY_MODE")
+    if mode not in (None, "", "full", "sample"):
+        raise ValueError("CO_DISCOVERY_MODE must be full or sample")
+    if mode == "full":
+        data["discovery_max_packs"] = 0
+    if data["output_language"] not in {"mixed", "en", "zh"}:
+        raise ValueError("CO_OUTPUT_LANGUAGE must be mixed/en/zh")
+    for key in ("pack_tokens", "graph_nodes_per_pack", "batch_packs", "merge_max_rounds", "merge_batch_items", "recovery_max_depth", "joern_timeout", "max_file_bytes"):
         if not isinstance(data[key], int) or data[key] <= 0:
             raise ValueError(f"{key} must be a positive integer")
     for key in ("neighbor_limit", "discovery_max_packs", "max_files"):
@@ -94,3 +151,23 @@ def load_policy(path: str | None = None) -> dict:
     if data["parser_backend"] not in {"auto", "joern", "tree-sitter"}:
         raise ValueError("parser_backend must be auto, joern or tree-sitter")
     return data
+
+
+def configuration_sources(env_file=None, policy_file=None):
+    """Names and origins only; never return values or secrets."""
+    file = Path(env_file) if env_file else PROJECT / ".env"
+    supplied = dotenv_values(file) if file.is_file() else {}
+    yaml_values = (yaml.safe_load(Path(policy_file).read_text(encoding="utf-8")) or {}) if policy_file else {}
+    def origin(key, fallback):
+        if os.environ.get(key) not in (None, ""):
+            return "system environment"
+        if supplied.get(key) not in (None, ""):
+            return str(file.resolve())
+        return fallback
+    policy = {field: origin(key, str(Path(policy_file).resolve()) if field in yaml_values else "built-in default")
+              for field, (key, _) in POLICY_ENV.items()}
+    if env_values(env_file).get("CO_DISCOVERY_MODE") == "full":
+        policy["discovery_max_packs"] = origin("CO_DISCOVERY_MODE", "built-in default") + " (full)"
+    model = {key: origin(key, "inherited global/default") for key in set(supplied) | set(os.environ)
+             if key.startswith(("LLM_", "OPENAI_"))}
+    return {"policy": policy, "model": model}

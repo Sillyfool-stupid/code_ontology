@@ -20,7 +20,7 @@ def main(argv=None):
     args = parser().parse_args(values)
     if args.command != "parse":
         raise ValueError("此入口仅支持工作台 parse")
-    settings, policy = load_settings(args.env_file), load_policy(args.config)
+    settings, policy = load_settings(args.env_file), load_policy(args.config, args.env_file)
     if args.parser_backend:
         policy["parser_backend"] = args.parser_backend
     dest = snapshot(args.repo, args.out, policy, settings.joern_home)

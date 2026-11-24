@@ -4,13 +4,13 @@ import hashlib
 import json
 import os
 import tempfile
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 from pathlib import Path
 from typing import Iterable, Any
 
 
 def now() -> str:
-    return datetime.now(timezone.utc).isoformat()
+    return datetime.now(timezone(timedelta(hours=8))).isoformat()
 
 
 def canonical(value: Any) -> str:

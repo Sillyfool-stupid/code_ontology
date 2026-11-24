@@ -5,6 +5,7 @@ from contextlib import contextmanager
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import json
 import threading
+import time
 
 
 def fixture_response(payload):
@@ -48,6 +49,14 @@ def fake_server(mode="normal"):
                 return
             user = next((m["content"] for m in request["messages"] if m["role"] == "user"), "{}")
             payload = json.loads(user)
+            stage = payload.get("stage")
+            state.setdefault("stage_counts", {})
+            state["stage_counts"][stage] = state["stage_counts"].get(stage, 0) + 1
+            if stage == "merge" and state.get("fail_merge_on") == state["stage_counts"][stage]:
+                self.respond(504, {"error": {"message": "fixture gateway timeout", "type": "timeout"}})
+                return
+            if stage == "merge" and state.get("merge_delay"):
+                time.sleep(state["merge_delay"])
             value = fixture_response(payload)
             content = json.dumps(value, ensure_ascii=False)
             if mode == "invalid_once" and state["requests"] == 1:
@@ -57,9 +66,10 @@ def fake_server(mode="normal"):
                 content = json.dumps(value)
             if mode == "empty_once" and state["requests"] == 1:
                 content = ""
+            truncated = mode == "truncated" or state.pop("truncate_next", False)
             self.respond(200, {"id": "fixture", "object": "chat.completion", "created": 1, "model": "fixture-only",
                                "choices": [{"index": 0, "message": {"role": "assistant", "content": content},
-                                            "finish_reason": "length" if mode == "truncated" else "stop"}],
+                                            "finish_reason": "length" if truncated else "stop"}],
                                "usage": {"prompt_tokens": 100, "completion_tokens": 10, "total_tokens": 110}})
 
         def respond(self, code, value):
@@ -67,7 +77,11 @@ def fake_server(mode="normal"):
             self.send_response(code)
             self.send_header("Content-Type", "application/json")
             self.send_header("Content-Length", str(len(body)))
-            self.end_headers(); self.wfile.write(body)
+            self.end_headers()
+            try:
+                self.wfile.write(body)
+            except (BrokenPipeError, ConnectionResetError):
+                pass
 
         def log_message(self, *args):
             pass

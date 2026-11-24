@@ -15,10 +15,10 @@ from .repository import verify_sources
 from .util import canonical, digest, iter_jsonl, now, read_json, token_bound, unique, write_json, write_jsonl, write_text
 
 SCHEMA_CONTRACT = """JSON shape (all top-level arrays required):
-{"version":"0.1","profile":"","classes":[{"id":"c1","name":"设备","definition":"业务定义","aliases":["Device"],"parents":[],"evidence_ids":["ev_..."]}],"relations":[{"id":"r1","name":"组成","definition":"业务含义","domain":["c1"],"range":["c1"],"evidence_ids":["ev_..."]}],"properties":[{"id":"p1","name":"标识","definition":"业务含义","domain":["c1"],"datatype":"string","unit":null,"evidence_ids":["ev_..."]}],"unresolved":[]}
+{"version":"0.1","profile":"","classes":[{"id":"c1","name":"Device","definition":"Equipment represented by source code","aliases":["Device"],"parents":[],"evidence_ids":["ev_..."]}],"relations":[{"id":"r1","name":"contains","definition":"Component membership","domain":["c1"],"range":["c1"],"evidence_ids":["ev_..."]}],"properties":[{"id":"p1","name":"identifier","definition":"Source identifier","domain":["c1"],"datatype":"string","unit":null,"evidence_ids":["ev_..."]}],"unresolved":[]}
 datatype is string/number/integer/boolean. Parents/domain/range reference declared class IDs. Empty arrays are valid. No extra keys."""
 EXTRACT_CONTRACT = """JSON shape (all top-level arrays required):
-{"entities":[{"id":"e1","name":"业务实体","type_id":"ID from schema","scope":"code_definition","basis":"direct","evidence_ids":["ev_..."]}],"relations":[{"subject":"e1","relation_id":"ID from schema","object":"e1","basis":"direct","evidence_ids":["ev_..."]}],"attributes":[{"subject":"e1","property_id":"ID from schema","value":"example","unit":null,"basis":"direct","evidence_ids":["ev_..."]}],"rules":[{"name":"规则","condition":"原始条件及配置约束","action":"代码执行的动作","scope":"code_definition","basis":"direct","evidence_ids":["ev_..."]}],"candidates":[{"reason":"为何无法纳入 schema","payload":{}}]}
+{"entities":[{"id":"e1","name":"SourceEntity","type_id":"ID from schema","scope":"code_definition","basis":"direct","evidence_ids":["ev_..."]}],"relations":[{"subject":"e1","relation_id":"ID from schema","object":"e1","basis":"direct","evidence_ids":["ev_..."]}],"attributes":[{"subject":"e1","property_id":"ID from schema","value":"example","unit":null,"basis":"direct","evidence_ids":["ev_..."]}],"rules":[{"name":"ThresholdRule","condition":"Original condition and configuration constraints","action":"Action implemented in code","scope":"code_definition","basis":"direct","evidence_ids":["ev_..."]}],"candidates":[{"reason":"Why the item cannot fit the fixed schema","payload":{}}]}
 scope is code_definition/configuration_record/test/example; basis is direct/inferred. Declare all entity endpoints in the same response. Empty arrays are valid. No extra keys."""
 
 
@@ -26,7 +26,11 @@ def prompt(policy: dict, profile: str, stage: str) -> str:
     directory = Path(policy["prompt_dir"]) if policy.get("prompt_dir") else RESOURCE / "prompts"
     common = (directory / "common" / "contract.txt").read_text(encoding="utf-8")
     special = (directory / profile / f"{stage}.txt").read_text(encoding="utf-8")
-    return common + "\n" + special + "\n" + (EXTRACT_CONTRACT if stage == "extract" else SCHEMA_CONTRACT)
+    language = policy.get("output_language", "mixed")
+    guidance = {"mixed": "English and Chinese may coexist. Prefer original source names; translate only when reliable.",
+                "en": "Use English readable labels and definitions, preserving original source identifiers.",
+                "zh": "Use Chinese explanations where reliable, preserving original source identifiers and technical names."}[language]
+    return common + "\n" + special + "\n" + guidance + "\n" + (EXTRACT_CONTRACT if stage == "extract" else SCHEMA_CONTRACT)
 
 
 def evidence_check(result: Ontology, allowed: set[str]):
@@ -109,10 +113,11 @@ class Pipeline:
         self.output = dest / "runs" / experiment / view / profile
         self.output.mkdir(parents=True, exist_ok=True)
         self.settings = settings
-        self.llm = LLM(settings, dest / "cache" / "llm")
+        self._llm = None
         self.namespace = experiment
         self.started = time.monotonic()
         self.errors = []
+        self.stage_stats = []
         self.packs = list(iter_jsonl(dest / "prepared" / view / "packs.jsonl"))
         if not self.packs:
             raise ValueError("No prepared evidence packs")
@@ -123,13 +128,37 @@ class Pipeline:
                 raise ValueError(f"Invalid source evidence: {pack['pack_id']}")
             for ref in pack["source_refs"]:
                 self.evidence[ref["evidence_id"]] = ref
+        previous_state = read_json(self.output / "run_manifest.json") if (self.output / "run_manifest.json").is_file() else {}
         self.state = {"created_at": now(), "view": view, "profile": profile, "experiment": experiment,
                       "settings": settings.public(), "policy": policy, "stages": {}, "source_snapshot": read_json(dest / "manifest.json")["snapshot_id"]}
+        self.state["stages"] = previous_state.get("stages", {})
         from .parsing import snapshot_parser
         self.state["parser"] = snapshot_parser(dest)
         write_jsonl(self.output / "evidence.jsonl", self.evidence.values())
         # A previous success must not hide a failed rerun.
         self.save_state("execution", "running")
+
+    @property
+    def llm(self):
+        if self._llm is None:
+            self._llm = LLM(self.settings.for_stage("extract"), self.dest / "cache" / "llm")
+        return self._llm
+
+    def discover_local(self):
+        from .stages import SchemaStages
+        runner = SchemaStages(self, "discover")
+        try:
+            return runner.local()
+        finally:
+            runner.close()
+
+    def merge_schema(self):
+        from .stages import SchemaStages
+        runner = SchemaStages(self, "merge")
+        try:
+            return runner.merge()
+        finally:
+            runner.close()
 
     def save_state(self, stage, status, **detail):
         self.state["stages"][stage] = {"state": status, "updated_at": now(), **detail}
@@ -141,8 +170,8 @@ class Pipeline:
         completed = 0
         print(f"STAGE {stage}: {len(jobs)} tasks", flush=True)
         iterator = iter(jobs)
-        with ThreadPoolExecutor(max_workers=self.settings.concurrency) as pool:
-            while window := list(islice(iterator, self.settings.concurrency)):
+        with ThreadPoolExecutor(max_workers=self.settings.for_stage("extract").concurrency) as pool:
+            while window := list(islice(iterator, self.settings.for_stage("extract").concurrency)):
                 futures = [(job, pool.submit(job["call"])) for job in window]
                 for job, future in futures:
                     try:
@@ -150,9 +179,15 @@ class Pipeline:
                         write_json(job["path"], value.model_dump())
                         job["path"].with_suffix(".failed.json").unlink(missing_ok=True)
                         results.append(value)
-                    except ModelFailure:
+                    except ModelFailure as exc:
                         # Configuration/auth failures should not fan out to every evidence pack.
-                        raise
+                        from .llm import RequestUnknown
+                        if not isinstance(exc, RequestUnknown):
+                            raise
+                        error = {"stage": stage, "task_id": job["id"], "error": str(exc), "state": "unknown"}
+                        self.errors.append(error)
+                        job["path"].unlink(missing_ok=True)
+                        write_json(job["path"].with_suffix(".failed.json"), error)
                     except Exception as e:
                         error = {"stage": stage, "task_id": job["id"], "error": self.llm.safe_error(e),
                                  "evidence_ids": job.get("evidence_ids", []), "state": "failed"}
@@ -164,60 +199,8 @@ class Pipeline:
         return results
 
     def discover(self):
-        self.save_state("discover", "running")
-        system = prompt(self.policy, self.profile, "discover")
-        selected = selected_packs(self.packs, self.policy["discovery_max_packs"])
-        selection = {"selected": [p["pack_id"] for p in selected],
-                     "unselected": [p["pack_id"] for p in self.packs if p not in selected], "total": len(self.packs)}
-        write_json(self.output / "schema" / "selection.json", selection)
-        payload_for = lambda batch: {"stage": "discover", "profile": self.profile, "packs": batch}
-        batches = list(group_batches(selected, system, self.llm, payload_for, self.policy["batch_packs"]))
-        jobs = []
-        for batch in batches:
-            tid = digest([p["pack_id"] for p in batch])
-            allowed = {e for p in batch for e in p["evidence_ids"]}
-            payload = payload_for(batch)
-            jobs.append({"id": tid, "evidence_ids": sorted(allowed), "path": self.output / "schema" / "local" / f"{tid}.json",
-                         "call": lambda payload=payload, allowed=allowed: self.llm.call(system, payload, Ontology,
-                         self.output / "llm_requests", lambda r: evidence_check(r, allowed), self.namespace)})
-        local = self.execute_jobs("discover", jobs)
-        if not local:
-            self.save_state("discover", "failed", errors=self.errors)
-            raise RuntimeError("All schema discovery tasks failed; inspect schema/local/*.failed.json")
-        candidates = [canonical_schema(s, self.profile).model_dump() for s in local]
-        candidates = list(unique(candidates))
-        merge_system = prompt(self.policy, self.profile, "merge")
-        merge_payload = lambda batch: {"stage": "merge", "profile": self.profile, "candidates": batch}
-        # Always run at least one global merge, even for one local schema.
-        for round_number in range(self.policy["merge_max_rounds"]):
-            batches = list(group_batches(candidates, merge_system, self.llm, merge_payload, 10000))
-            if len(candidates) > 1 and all(len(b) == 1 for b in batches):
-                raise BudgetError("Schema merge cannot reduce within context budget. Increase context or reduce discovery scope")
-            merged = []
-            for idx, batch in enumerate(batches):
-                allowed = {e for s in batch for e in supported_ids(Ontology.model_validate(s))}
-                value = self.llm.call(merge_system, merge_payload(batch), Ontology, self.output / "llm_requests",
-                                      lambda r: evidence_check(r, allowed), self.namespace)
-                value = canonical_schema(value, self.profile)
-                # Track source candidates omitted by the merge instead of silently losing coverage.
-                source_names = {c["name"] for s in batch for c in s["classes"]}
-                target_names = {c.name for c in value.classes} | {a for c in value.classes for a in c.aliases}
-                write_json(self.output / "schema" / "merge" / f"{round_number}-{idx}.json", {
-                    "schema": value.model_dump(), "unmatched_source_names": sorted(source_names - target_names)})
-                merged.append(value.model_dump())
-            candidates = merged
-            if len(candidates) == 1:
-                break
-        if len(candidates) != 1:
-            raise RuntimeError("Schema merge rounds exhausted; reduce scope or increase configured rounds")
-        schema = Ontology.model_validate(candidates[0])
-        write_json(self.output / "schema" / "schema.json", schema.model_dump())
-        write_json(self.output / "schema" / "provenance.json", {
-            "schema_hash": digest(schema.model_dump()), "prompt_hash": digest(system + merge_system),
-            "packs_hash": digest(self.packs), "review_status": "machine_generated_not_human_verified",
-            "local_tasks": len(jobs), "failed_tasks": len(self.errors), "selected_packs": len(selected), "total_packs": len(self.packs)})
-        self.save_state("discover", "partial" if self.errors else "success", schema_hash=digest(schema.model_dump()))
-        return schema
+        self.discover_local()
+        return self.merge_schema()
 
     def fixed_schema(self, supplied: Path | None = None, update=False):
         path = supplied or self.output / "schema" / "schema.json"
@@ -273,13 +256,22 @@ class Pipeline:
         chosen = {r.id for col in (best.classes, best.relations, best.properties) for r in col}
         return best, sorted(all_ids - chosen)
 
-    def extract(self, schema: Ontology):
+    def extract(self, schema: Ontology, finalize=True):
         self.save_state("extract", "running")
         system = prompt(self.policy, self.profile, "extract")
         jobs, selection = [], []
+        signature = self.extraction_fingerprint(schema)
         # Start with one pack to keep fixed-schema budget handling deterministic.
         for pack in self.packs:
-            sub, omitted = self.extraction_schema(schema, [pack], system)
+            try:
+                sub, omitted = self.extraction_schema(schema, [pack], system)
+            except BudgetError as exc:
+                failure = {"stage": "extract", "task_id": digest(pack["pack_id"]), "state": "failed",
+                           "packs": [pack["pack_id"]], "evidence_ids": pack["evidence_ids"], "error": str(exc)}
+                self.errors.append(failure)
+                write_json(self.output / "extraction" / f"{failure['task_id']}.failed.json", failure)
+                selection.append({"task_id": failure["task_id"], "packs": [pack["pack_id"]], "state": "budget_failed"})
+                continue
             payload = {"stage": "extract", "schema": sub.model_dump(), "packs": [pack]}
             tid = digest([pack["pack_id"], digest(sub.model_dump())])
             selection.append({"task_id": tid, "packs": [pack["pack_id"]], "omitted_schema_ids": omitted})
@@ -291,14 +283,76 @@ class Pipeline:
                     raise ValueError("Extraction references evidence outside this task")
 
             jobs.append({"id": tid, "evidence_ids": list(allowed), "path": self.output / "extraction" / f"{tid}.json",
-                         "call": lambda payload=payload, validator=validator: self.llm.call(system, payload, Extraction,
-                         self.output / "llm_requests", validator, self.namespace)})
+                         "call": lambda payload=payload, validator=validator: self.extract_task(system, payload, validator)})
         write_json(self.output / "extraction" / "selection.json", selection)
+        write_json(self.output / "extraction" / "manifest.json", {"state": "running", "key": signature,
+                   "tasks": [j["id"] for j in jobs], "schema": schema.model_dump()})
         results = self.execute_jobs("extract", jobs)
-        self.finalize(schema, results)
+        write_json(self.output / "extraction" / "manifest.json", {"state": "partial" if self.errors else "success", "key": signature,
+                   "tasks": [j["id"] for j in jobs], "schema": schema.model_dump(), "errors": self.errors,
+                   "llm": dict(self.llm.stats), "elapsed_seconds": round(time.monotonic()-self.started, 3)})
+        if finalize:
+            self.finalize(schema, results)
         self.save_state("extract", "partial" if self.errors else "success", tasks=len(jobs), successful=len(results))
         self.save_state("execution", "partial" if self.errors else "success")
         return not self.errors
+
+    def extraction_fingerprint(self, schema):
+        return digest({"packs": self.packs, "schema": schema.model_dump(), "prompt": prompt(self.policy, self.profile, "extract"),
+                       "settings": self.settings.for_stage("extract").public(), "recovery": self.policy["recovery_max_depth"]})
+
+    def extract_task(self, system, payload, validator, depth=0):
+        recovery_key = digest({"payload": payload, "system": system, "settings": self.settings.for_stage("extract").public()})
+        recovery = self.output / "extraction" / "recovery" / f"{recovery_key}.json"
+        try:
+            if recovery.is_file():
+                raise BudgetError("Checkpoint requires split")
+            return self.llm.call(system, payload, Extraction, self.output / "llm_requests", validator, self.namespace)
+        except BudgetError:
+            write_json(recovery, {"state": "needs_split", "key": recovery_key})
+            code = payload["packs"][0]["code"]
+            if depth >= self.policy["recovery_max_depth"] or len(code) < 80:
+                raise
+            cut = code.find("\n", len(code)//2)
+            cut = cut+1 if 0 <= cut < len(code)-1 else len(code)//2
+            combined = {k: [] for k in ("entities", "relations", "attributes", "rules", "candidates")}
+            for index, fragment in enumerate((code[:cut], code[cut:])):
+                pack = {**payload["packs"][0], "code": fragment, "context": {},
+                        "fragment_of": payload["packs"][0]["pack_id"]}
+                result = self.extract_task(system, {**payload, "packs": [pack]}, validator, depth+1).model_dump()
+                remap = {r["id"]: f"part{index}_{r['id']}" for r in result["entities"]}
+                for row in result["entities"]:
+                    row["id"] = remap[row["id"]]
+                for row in result["relations"]:
+                    row["subject"] = remap.get(row["subject"], row["subject"])
+                    row["object"] = remap.get(row["object"], row["object"])
+                for row in result["attributes"]:
+                    row["subject"] = remap.get(row["subject"], row["subject"])
+                for key in combined:
+                    combined[key] += result[key]
+            return Extraction.model_validate(combined)
+
+    def finalize_saved(self):
+        path = self.output / "extraction" / "manifest.json"
+        if not path.is_file():
+            raise ValueError("Run extract first")
+        manifest = read_json(path)
+        schema = Ontology.model_validate(manifest["schema"])
+        if manifest["state"] != "success" or manifest["key"] != self.extraction_fingerprint(schema):
+            raise ValueError("Extraction incomplete or configuration changed; rerun extract")
+        if read_json(self.output / "schema/schema.json") != schema.model_dump():
+            raise ValueError("Fixed schema changed since extraction; rerun extract")
+        self.stage_stats.append(manifest.get("llm", {}))
+        results = [Extraction.model_validate(read_json(self.output / "extraction" / f"{tid}.json")) for tid in manifest["tasks"]]
+        self.finalize(schema, results)
+        metrics_path = self.output / "metrics.json"
+        metrics = read_json(metrics_path)
+        metrics["elapsed_seconds"] += manifest.get("elapsed_seconds", 0)
+        metrics["elapsed_note"] = "Independent extract + finalize duration; upstream stages recorded separately"
+        write_json(metrics_path, metrics)
+        report_run(self.output)
+        self.save_state("finalize", "success")
+        self.save_state("execution", "success")
 
     def finalize(self, schema: Ontology, results: list[Extraction]):
         classes = {c.id: c for c in schema.classes}
@@ -385,13 +439,16 @@ class Pipeline:
                    "prepared_packs": len(self.packs), "failures": len(self.errors),
                    "evidence_locatable_rate": 1.0 if assertions else None,
                    "evidence_note": "Source location validity only; semantic support still needs human review",
-                   "elapsed_seconds": round(time.monotonic() - self.started, 3), "llm": dict(self.llm.stats)}
+                   "elapsed_seconds": round(time.monotonic() - self.started, 3),
+                   "llm": {key: sum(s.get(key, 0) for s in self.stage_stats + ([self._llm.stats] if self._llm else []))
+                           for key in ("requests", "cache_hits", "retries", "repairs", "prompt_tokens", "completion_tokens")}}
         write_json(self.output / "metrics.json", metrics)
         write_jsonl(self.output / "failures.jsonl", self.errors)
         report_run(self.output)
 
     def close(self):
-        self.llm.close()
+        if self._llm is not None:
+            self._llm.close()
 
 
 def report_run(output: Path):

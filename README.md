@@ -1,5 +1,7 @@
 # 代码业务本体抽取基线
 
+**内网逐步运行推荐入口**：常用参数集中在 `.env`，使用 `scripts\intranet.bat init` 初始化，再逐步执行 `scan`、`parse`、`normalize`、`prepare`、`discover-local`、`merge-schema`、`extract`、`finalize`、`validate`、`report`。Schema 合并可独立续跑；中英文输出并存。配置、阶段产物、截断/超时恢复及内网自检见 **[内网短命令与独立合并](docs/INTRANET_STEPS.md)**。旧 CLI/YAML 仍兼容。
+
 输入一个 C/C++ 仓库路径，使用 **Joern（AST/CFG/综合 CPG）或 Tree-sitter（AST）→ 证据包 → LLM 发现 schema → 合并固定 schema → 实例抽取 → 校验和对比报告**。
 
 **没有 Joern 时可直接使用 Tree-sitter，无需 Java 或编译器。** 默认 `parser_backend: auto` 优先 Joern，找不到工具时使用 Tree-sitter AST；也可用 `--parser-backend tree-sitter` 强制选择。安装依赖后最短命令：

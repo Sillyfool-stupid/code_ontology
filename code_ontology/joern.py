@@ -132,7 +132,7 @@ def normalize(dest: Path, views: list[str], raw_directory: Path | None = None, p
         write_jsonl(dest / "normalized" / "symbols.jsonl", symbols)
 
 
-def parse(dest: Path, settings: Settings, policy: dict, views: list[str], force: bool = False):
+def parse(dest: Path, settings: Settings, policy: dict, views: list[str], force: bool = False, raw_only=False):
     manifest = verify_sources(dest)
     stage_state(dest, "parse", "running", views=views)
     try:
@@ -177,7 +177,8 @@ def parse(dest: Path, settings: Settings, policy: dict, views: list[str], force:
             invoke(args, work, dest / "logs" / "export.log", timeout)
             if not (exported / "export.json").exists():
                 raise RuntimeError("Export did not complete; inspect logs/export.log (Joern version compatibility)")
-        normalize(dest, views)
+        if not raw_only:
+            normalize(dest, views)
         stage_state(dest, "parse", "success", views=views, counts=read_json(exported / "export.json"))
     except Exception as e:
         stage_state(dest, "parse", "failed", error=str(e))

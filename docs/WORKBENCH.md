@@ -1,5 +1,7 @@
 # 分阶段可视化工作台使用说明
 
+2026-11-24 更新：新增独立“局部 Schema 提取”“合并 Schema”“归并实例产物”按钮；网页 extract 生成批次后单独 finalize，再校验。原 discover 组合按钮仍保留。YAML 可留空，常用策略读取 .env；合并参数与发现/实例分开。产物和恢复边界见 [内网逐步脚本](INTRANET_STEPS.md)。下文旧表格中的 extract 包含归并描述适用于历史 CLI，不再是网页独立按钮的行为。
+
 ## Tree-sitter 模式（2026-11-24）
 
 没有 Joern 时，YAML 选择 `configs/tree-sitter.yaml` 后保存工作区。内置解析器直接读取源码，后续各阶段使用 AST；界面显示限制并将实验改为 AST 两组，验收不要求 cpg.bin。默认 auto 在 Joern 工具缺失时也会采用此模式。安装、产物和独立命令见 [TREE_SITTER.md](TREE_SITTER.md)。以下 Joern 六组描述只适用于 Joern 后端；外部任意 Tree-sitter JSON 导入仍需适配。

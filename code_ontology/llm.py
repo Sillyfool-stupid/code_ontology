@@ -23,6 +23,11 @@ class ModelFailure(RuntimeError):
     pass
 
 
+class RequestUnknown(ModelFailure):
+    """The client stopped waiting; the server may still be computing."""
+    pass
+
+
 def parse_json(text: str):
     text = text.strip()
     if text.startswith("```"):
@@ -96,6 +101,13 @@ class LLM:
                           "endpoint": self.settings.public()["base_url"], "parameters": params}
                 path = traces / f"{key}-{'repair' if repair else 'initial'}-{attempt}-{time.time_ns()}.json"
                 write_json(path, record)
+                started = time.monotonic()
+                heartbeat = threading.Event()
+                def progress():
+                    while not heartbeat.wait(15):
+                        print(f"WAIT model stage={key[:10]} started={record['created_at']} elapsed={time.monotonic()-started:.0f}s log={path}", flush=True)
+                monitor = threading.Thread(target=progress, daemon=True)
+                monitor.start()
                 try:
                     with self.lock:
                         self.stats["requests"] += 1
@@ -117,6 +129,9 @@ class LLM:
                 except APIStatusError as e:
                     message = self.safe_error(e)
                     record["error"] = message; write_json(path, record)
+                    if e.status_code in {408, 504}:
+                        record["state"] = "unknown"; write_json(path, record)
+                        raise RequestUnknown(f"Gateway/request timeout ({e.status_code}); server state unknown. Retry explicitly after checking server") from e
                     # Downgrade only for an explicit response_format/JSON capability rejection.
                     unsupported = e.status_code in {400, 422} and re.search(r"response_format|json_object|json mode", message, re.I) and re.search(r"unsupported|not support|invalid|unknown", message, re.I)
                     if unsupported and self.settings.json_mode == "auto" and self.json_supported:
@@ -126,10 +141,17 @@ class LLM:
                         raise ModelFailure(f"Non-retryable API error ({e.status_code}); inspect request log") from e
                     if attempt >= self.settings.retries:
                         raise ModelFailure(f"API retries exhausted ({e.status_code}); inspect request log") from e
-                except (APIConnectionError, APITimeoutError) as e:
+                except APITimeoutError as e:
+                    record.update(error=self.safe_error(e), state="unknown", ended_at=now())
+                    write_json(path, record)
+                    raise RequestUnknown("Client timeout; server execution state unknown. Inspect logs before explicitly retrying") from e
+                except APIConnectionError as e:
                     record["error"] = self.safe_error(e); write_json(path, record)
                     if attempt >= self.settings.retries:
                         raise ModelFailure("Connection retries exhausted; inspect request log") from e
+                finally:
+                    heartbeat.set()
+                    monitor.join(timeout=1)
                 with self.lock:
                     self.stats["retries"] += 1
                 time.sleep(min(20, 2 ** attempt) + random.random() / 4)
