@@ -10,7 +10,7 @@ from pydantic import BaseModel
 from .config import PROJECT, RESOURCE, load_policy, load_settings
 from .console import configure_console
 from .joern import executable, invoke, normalize
-from .parsing import BACKENDS, parse_repository, parser_views, select_backend, snapshot_parser
+from .parsing import BACKENDS, parse_repository, parser_views, select_backend, snapshot_parser, normalize_repository
 from .llm import LLM
 from .models import Ontology, Extraction
 from .pipeline import Pipeline, comparison, report_run, supported_ids
@@ -23,7 +23,7 @@ def parser():
     root = argparse.ArgumentParser(description="Joern / Tree-sitter + LLM 代码业务本体抽取")
     sub = root.add_subparsers(dest="command", required=True)
     commands = {}
-    for name in ("scan", "parse", "prepare", "discover", "extract", "run", "experiment", "doctor", "report", "validate", "evaluate", "import-graph"):
+    for name in ("scan", "parse", "prepare", "discover", "extract", "run", "experiment", "doctor", "report", "validate", "evaluate", "import-graph", "normalize", "discover-local", "merge-schema", "finalize"):
         p = sub.add_parser(name)
         p.add_argument("--env-file")
         p.add_argument("--config", help="YAML policy; unknown keys are rejected")
@@ -39,17 +39,19 @@ def parser():
     for name in ("parse", "run", "experiment"):
         commands[name].add_argument("--views", help="Comma-separated ast,cfg,cpg")
         commands[name].add_argument("--force-parse", action="store_true")
-    for name in ("prepare", "discover", "extract", "validate", "import-graph"):
+    for name in ("prepare", "discover", "extract", "validate", "import-graph", "normalize", "discover-local", "merge-schema", "finalize"):
         commands[name].add_argument("--snapshot", type=Path, required=True)
-    for name in ("prepare", "discover", "extract", "validate"):
+    for name in ("prepare", "discover", "extract", "validate", "normalize", "discover-local", "merge-schema", "finalize"):
         commands[name].add_argument("--view", choices=["ast", "cfg", "cpg"], default="cpg")
-    for name in ("discover", "extract", "run", "experiment"):
+    for name in ("discover", "extract", "run", "experiment", "discover-local", "merge-schema", "finalize"):
         p = commands[name]
         p.add_argument("--profile", choices=["general", "maintenance", "both"])
         p.add_argument("--experiment", default="baseline", help="Use a new ID for independent repeated experiments")
         p.add_argument("--update-schema", action="store_true")
         if name != "discover":
             p.add_argument("--schema", type=Path)
+    commands["parse"].add_argument("--raw-only", action="store_true")
+    commands["extract"].add_argument("--defer-finalize", action="store_true")
     commands["doctor"].add_argument("--no-llm", action="store_true")
     commands["doctor"].add_argument("--out", type=Path, default=PROJECT / "outputs" / "doctor")
     commands["report"].add_argument("--snapshot", type=Path)
@@ -181,7 +183,7 @@ def main(argv=None):
     args = parser().parse_args(argv)
     try:
         settings = load_settings(args.env_file)
-        policy = load_policy(args.config)
+        policy = load_policy(args.config, args.env_file)
         if args.parser_backend:
             policy["parser_backend"] = args.parser_backend
         for key in ("include", "exclude", "max_files"):
@@ -229,6 +231,8 @@ def main(argv=None):
             return 0
         if command == "validate":
             return validate(dest, args.view, args.run_dir)
+        if command == "normalize":
+            normalize_repository(dest, [args.view]); return 0
         views = split_choice(getattr(args, "views", None), policy["views"], {"ast", "cfg", "cpg"})
         if command in {"parse", "run", "experiment"}:
             info = snapshot_parser(dest)
@@ -237,16 +241,19 @@ def main(argv=None):
             if effective != views:
                 print("Tree-sitter supports AST only; requested CFG/CPG views are replaced with AST.", flush=True)
             views = effective
-            parse_repository(dest, settings, policy, views, args.force_parse)
+            parse_repository(dest, settings, policy, views, args.force_parse, getattr(args, "raw_only", False))
             if command == "parse":
                 print(f"{info['backend']} parse and view exports complete")
                 return 0
         if command == "prepare":
             print(prepare(dest, args.view, policy)); return 0
-        if command in {"discover", "extract"}:
+        if command in {"discover", "extract", "discover-local", "merge-schema", "finalize"}:
             views = [args.view]
         for view in views:
-            prepare(dest, view, policy)
+            if command not in {"extract", "discover-local", "merge-schema", "finalize"}:
+                prepare(dest, view, policy)
+            elif not (dest / "prepared" / view / "packs.jsonl").is_file():
+                raise ValueError("Run prepare first")
         profile_arg = getattr(args, "profile", None)
         profiles = ["general", "maintenance"] if profile_arg == "both" else [profile_arg] if profile_arg else policy["profiles"]
         errors = []
@@ -257,28 +264,47 @@ def main(argv=None):
             pipeline = None
             try:
                 pipeline = Pipeline(dest, view, profile, args.experiment, settings, policy)
-                schema = pipeline.fixed_schema(getattr(args, "schema", None), args.update_schema)
-                if command != "discover":
-                    if not pipeline.extract(schema):
-                        errors.append(f"{view}/{profile}: partial")
+                if command == "discover-local":
+                    pipeline.discover_local()
+                elif command == "merge-schema":
+                    pipeline.merge_schema()
+                elif command == "finalize":
+                    pipeline.finalize_saved()
                 else:
+                    supplied = getattr(args, "schema", None)
+                    if command == "extract":
+                        supplied = supplied or pipeline.output / "schema" / "schema.json"
+                        merge_status = pipeline.output / "schema" / "merge-status.json"
+                        if merge_status.is_file() and read_json(merge_status)["state"] != "success":
+                            raise ValueError("Schema merge incomplete; run merge-schema first")
+                        if merge_status.is_file() and (pipeline.output / "schema/local-manifest.json").is_file():
+                            from .stages import SchemaStages
+                            checker = SchemaStages(pipeline, "merge")
+                            try:
+                                checker.verify_merged()
+                            finally:
+                                checker.close()
+                    schema = pipeline.fixed_schema(supplied, args.update_schema)
+                    if command != "discover":
+                        if not pipeline.extract(schema, not getattr(args, "defer_finalize", False)):
+                            errors.append(f"{view}/{profile}: partial")
+                if command in {"discover", "discover-local", "merge-schema"}:
                     pipeline.save_state("execution", "partial" if pipeline.errors else "success")
-                    if pipeline.errors:
-                        errors.append(f"{view}/{profile}: partial discovery")
                 (pipeline.output / "execution.failed.json").unlink(missing_ok=True)
                 print(f"OUTPUT={pipeline.output}", flush=True)
             except Exception as e:
+                safe_error = str(e).replace(settings.api_key, "<redacted>") if settings.api_key else str(e)
                 if pipeline:
-                    pipeline.save_state("execution", "failed", error=pipeline.llm.safe_error(e))
+                    pipeline.save_state("execution", "partial" if command in {"discover-local", "merge-schema"} else "failed", error=safe_error)
                 failure = {"view": view, "profile": profile, "state": "failed",
-                           "error": pipeline.llm.safe_error(e) if pipeline else str(e), "updated_at": now()}
+                           "error": safe_error, "updated_at": now()}
                 write_json(dest / "runs" / args.experiment / view / profile / "execution.failed.json", failure)
                 errors.append(f"{view}/{profile}: {e}")
                 print(f"FAILED {view}/{profile}: {e}", file=sys.stderr, flush=True)
             finally:
                 if pipeline:
                     pipeline.close()
-        if command != "discover":
+        if command not in {"discover", "discover-local", "merge-schema"} and not getattr(args, "defer_finalize", False):
             print(comparison(dest, args.experiment))
         if errors:
             write_json(dest / "runs" / args.experiment / "errors.json", errors)

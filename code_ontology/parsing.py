@@ -56,10 +56,24 @@ def parser_views(info, requested):
     return ["ast"] if info["backend"] == "tree-sitter" else list(requested)
 
 
-def parse_repository(dest, settings, policy, views, force=False):
+def parse_repository(dest, settings, policy, views, force=False, raw_only=False):
     info = snapshot_parser(dest)
     if info["backend"] == "tree-sitter":
         from .treesitter import parse
-        return parse(dest, settings, policy, ["ast"], force)
+        return parse(dest, settings, policy, ["ast"], force, raw_only=raw_only)
     from .joern import parse
-    return parse(dest, settings, policy, views, force)
+    return parse(dest, settings, policy, views, force, raw_only=raw_only)
+
+
+def normalize_repository(dest, views):
+    from .joern import normalize
+    from .repository import verify_sources, stage_state
+    verify_sources(dest)
+    info = snapshot_parser(dest)
+    effective = parser_views(info, views)
+    raw = Path(dest) / "raw" / ("tree-sitter" if info["backend"] == "tree-sitter" else "cpg")
+    if not (raw / "export.json").is_file():
+        raise ValueError("No completed raw graph; run parse first")
+    stage_state(dest, "normalize", "running")
+    normalize(dest, effective, raw_directory=raw, parser_info=info)
+    stage_state(dest, "normalize", "success", views=effective)

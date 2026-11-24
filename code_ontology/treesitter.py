@@ -70,7 +70,7 @@ def syntax_errors(root):
     return count, samples
 
 
-def parse(dest: Path, settings, policy, views, force=False):
+def parse(dest: Path, settings, policy, views, force=False, raw_only=False):
     if list(views) != ["ast"]:
         raise ValueError("tree-sitter only supports AST")
     manifest = verify_sources(dest)
@@ -159,7 +159,8 @@ def parse(dest: Path, settings, policy, views, force=False):
             write_json(raw / "parse_report.json", report)
             write_json(marker, {"key": marker_key, "backend": "tree-sitter", "created_at": now(),
                                 "nodes": node_count, "edges": edge_count, "files": len(files)})
-        normalize(dest, ["ast"], raw_directory=raw, parser_info=info)
+        if not raw_only:
+            normalize(dest, ["ast"], raw_directory=raw, parser_info=info)
         report = read_json(raw / "parse_report.json")
         stage_state(dest, "parse", "success", backend="tree-sitter", views=["ast"],
                     counts=read_json(marker), syntax_errors=report["syntax_errors"], cached=bool(cached and not force))

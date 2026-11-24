@@ -94,6 +94,7 @@ class WorkbenchTests(unittest.TestCase):
             self.run_stage("discover")
             extracted = self.run_stage("extract")
             self.assertTrue((Path(extracted["log"]).parent / "input-schema.json").is_file())
+            extracted = self.run_stage("finalize")
             self.assertTrue((Path(extracted["log"]).parent / "metrics.json").is_file())
             self.run_stage("validate")
             self.run_stage("report")
@@ -102,7 +103,7 @@ class WorkbenchTests(unittest.TestCase):
             run = snap / "runs/test-01/cpg/maintenance"
             self.assertTrue(read_json(run / "validation.json")["ok"])
             before = transport["requests"]
-            self.run_stage("extract")
+            self.run_stage("extract"); self.run_stage("finalize")
             self.assertEqual(before, transport["requests"])
             for path in (self.root / "control").rglob("*"):
                 if path.is_file() and path.suffix in {".json", ".log", ".yaml"}:
@@ -153,7 +154,7 @@ class WorkbenchTests(unittest.TestCase):
             self.assertIn("无需先抽取实例", detail["workbench_note"])
             evidence = detail["schema"]["classes"][0]["evidence_ids"][0]
             self.assertTrue(store.evidence(rid, evidence)["source_hash_matches"])
-            self.run_stage("extract")
+            self.run_stage("extract"); self.run_stage("finalize")
             run = Path(w["snapshot"]) / "runs/test-01/cpg/maintenance"
             new_schema = read_json(run / "schema/schema.json")
             new_schema["classes"][0]["name"] = "新发现概念"

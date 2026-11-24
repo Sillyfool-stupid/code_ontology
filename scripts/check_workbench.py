@@ -64,7 +64,7 @@ def main():
                     raise RuntimeError(json.dumps(current, ensure_ascii=False) + "\n" + service.logs(job["id"])["text"])
                 results.append({"stage": stage, "job": current["id"], "state": current["state"]})
                 return current
-            for stage in ("doctor", "scan", "parse", "prepare", "discover", "extract", "validate", "evaluate", "report", "sample", "summarize"):
+            for stage in ("doctor", "scan", "parse", "prepare", "discover-local", "merge-schema", "extract", "finalize", "validate", "evaluate", "report", "sample", "summarize"):
                 run(stage)
             before = transport["requests"]
             run("extract")

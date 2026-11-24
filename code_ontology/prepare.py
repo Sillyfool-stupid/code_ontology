@@ -90,6 +90,9 @@ def compact_node(node: dict) -> dict:
 
 
 def prepare(dest: Path, view: str, policy: dict):
+    import time
+    started = time.monotonic()
+    print("PREPARE checking source snapshot", flush=True)
     manifest = verify_sources(dest)
     from .parsing import snapshot_parser
     info = snapshot_parser(dest)
@@ -124,10 +127,13 @@ def prepare(dest: Path, view: str, policy: dict):
             def records():
                 nonlocal count, truncations
                 symbols = list(iter_jsonl(dest / "normalized" / "symbols.jsonl"))
+                print(f"PREPARE collecting {len(symbols)} symbols", flush=True)
                 symbols.sort(key=lambda s: (str(s.get("FILENAME", "")), int(s.get("LINE_NUMBER") or 0), s["node_id"]))
                 units = []
                 seen = set()
-                for symbol in symbols:
+                for number, symbol in enumerate(symbols):
+                    if number % 100 == 0:
+                        print(f"PREPARE symbols {number}/{len(symbols)} file={symbol.get('FILENAME')} elapsed={time.monotonic()-started:.1f}s", flush=True)
                     file = resolve_file(str(symbol.get("FILENAME", "")), dest, manifest)
                     line = int(symbol.get("LINE_NUMBER") or 0)
                     if not file or not line or symbol.get("IS_EXTERNAL") in (True, "true") or symbol.get("NAME") in {"<global>", "<init>", "<clinit>"}:
@@ -158,7 +164,7 @@ def prepare(dest: Path, view: str, policy: dict):
                     if not record["is_code"]:
                         units.append((file, 1, len(source(file)), {"symbol_id": "file_" + digest(file), "NAME": file,
                                                                  "kind": "DOCUMENT", "SIGNATURE": ""}, []))
-                    elif info["backend"] == "tree-sitter":
+                    else:
                         # Keep macros/globals and error regions outside symbol ranges as evidence.
                         covered = sorted((u[1], u[2]) for u in units if u[0] == file)
                         cursor, gaps = 1, []
@@ -176,6 +182,8 @@ def prepare(dest: Path, view: str, policy: dict):
                                     units.append((file, start, end, {"symbol_id": "file_" + digest(file), "NAME": file,
                                                                      "kind": "FILE", "SIGNATURE": ""}, descendants))
                 for file, start, end, symbol, descendants in units:
+                    if count % 100 == 0:
+                        print(f"PREPARE packs={count} file={file} symbol={symbol.get('NAME')} elapsed={time.monotonic()-started:.1f}s", flush=True)
                     if end < start:
                         continue
                     text = "".join(source(file)[start - 1:end])
