@@ -1,5 +1,15 @@
 # 验证记录
 
+## 2026-11-24：分阶段工作台
+
+分支 `feature/stage-workbench`，解释器为本项目 `.venv`。完整 `python -m unittest discover -s tests -v` 共 **38 项通过**（41.177 秒），包含原 CLI/viewer/review 的 27 项与新增工作台的 11 项测试。Windows 进程树取消及异常子进程清理在正常进程权限下实测通过；模拟 API 不调用真实模型。Python compileall、工作台 JavaScript `node --check` 通过。新增 Schema 展示测试覆盖 discover 后直接读取概念与源码、更新后区分发现 Schema 和最终 Schema、不混用旧实例。
+
+`python scripts/check_workbench.py --real-joern`：真实 Joern 经工作台的子进程编排完成扫描、三视图解析、prepare、discover、extract、validate、evaluate、report、sample、summarize、extract 续跑、experiment 六组。全部阶段成功，六组齐全，模拟 API 共 356 次请求，同配置实例续跑新增请求 0。解释器记录、阶段任务 ID 与快照见 `outputs/workbench-verification/verification.json`。模拟结果不可用于语义评价。本次未调用用户真实模型。
+
+自动覆盖配置冻结、Schema 复用提示、源码变化中止 Joern、分页/大记录截断、越界/环境文件拒绝、密钥脱敏、HTTP 同源/会话、任务失败状态与异常恢复。浏览器预览授权被拒绝，未完成真实浏览器渲染和点击验收。工作台使用方法见 [WORKBENCH.md](WORKBENCH.md)。
+
+---
+
 验证日期：2026-11-23。以下区分真实模型抽取与模拟接口测试；当前结果未经完整人工语义评审。
 
 ## 环境

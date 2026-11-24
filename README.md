@@ -10,6 +10,16 @@
 
 当前版本交付 JSON/JSONL、Markdown 与本地浏览界面；RDF、图数据库、完整 CMake 求值和数据流推理不在基线中。
 
+**新增分阶段工作台**：选择输入/输出目录，用按钮逐步扫描、Joern 抽取、准备模型输入、发现 Schema、抽取实例、校验和审核；可查看每步产物、日志与真实模型请求。沿用原抽取流程。使用项目自带虚拟环境，在 CMD 启动：
+
+```bat
+cd /d "D:\code\f47-work\code-ontology"
+call .venv\Scripts\activate.bat
+python -m code_ontology.workbench --port 8766
+```
+
+浏览器打开 `http://127.0.0.1:8766`。操作步骤、输入输出、六组实验和恢复方法见 **[工作台使用说明](docs/WORKBENCH.md)**。不需要新增 Python 依赖或 npm 构建。
+
 新增独立的本地只读界面，支持本体 / 实例子图、断言分页、源码证据、实验对比、阶段追踪和人工评审；不改变现有抽取逻辑。图数据库和 RDF/OWL 推理仍未实现。
 
 使用 CMD 请看 **[CMD 完整运行步骤](docs/RUNNING_CMD.md)**，PowerShell/Linux 请看 **[完整运行步骤](docs/RUNNING.md)**；内网实验与判优方法见 **[实验评估手册](docs/EXPERIMENTS.md)**，每阶段输入输出见 **[数据流说明](docs/PIPELINE_IO.md)**。

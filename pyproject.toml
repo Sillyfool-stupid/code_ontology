@@ -16,4 +16,4 @@ code-ontology = "code_ontology.cli:main"
 include = ["code_ontology*"]
 
 [tool.setuptools.package-data]
-code_ontology = ["resources/**/*.txt", "resources/*.yaml", "resources/*.sc", "resources/viewer/*.html", "resources/viewer/*.css", "resources/viewer/*.js"]
+code_ontology = ["resources/**/*.txt", "resources/*.yaml", "resources/*.sc", "resources/viewer/*.html", "resources/viewer/*.css", "resources/viewer/*.js", "resources/workbench/*.html", "resources/workbench/*.css", "resources/workbench/*.js"]

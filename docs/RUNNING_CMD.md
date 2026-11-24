@@ -26,6 +26,16 @@ notepad .env
 
 在新机器填写内网模型地址、密钥、模型名、合法的上下文与输出预算、JOERN_HOME；Joern 与兼容 Java 单独安装。配置含义见 RUNNING.md 与 README.md。
 
+### 用网页逐步执行
+
+当前终端已激活项目 `.venv` 时：
+
+```bat
+python -m code_ontology.workbench --port 8766
+```
+
+保持终端运行，浏览器打开 `http://127.0.0.1:8766`，设置输入/输出目录、YAML 和 `.env` 后保存工作区，再按阶段执行。模型按钮会调用配置的模型。完整操作、日志、六组与审核见 [工作台说明](WORKBENCH.md)。原只读 viewer 在 8765 的用法保持不变。
+
 ## 2. 运行一个完整示例
 
 ```bat
