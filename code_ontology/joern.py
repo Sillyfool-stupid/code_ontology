@@ -18,7 +18,8 @@ EDGE_SETS = {
 }
 KEEP_PROPS = {"NAME", "FULL_NAME", "METHOD_FULL_NAME", "SIGNATURE", "FILENAME", "CODE", "LINE_NUMBER", "LINE_NUMBER_END",
               "COLUMN_NUMBER", "TYPE_FULL_NAME", "IS_EXTERNAL", "DISPATCH_TYPE", "CONTROL_STRUCTURE_TYPE", "VALUE",
-              "ORDER", "ARGUMENT_INDEX", "INHERITS_FROM_TYPE_FULL_NAME", "AST_PARENT_FULL_NAME", "AST_PARENT_TYPE"}
+              "ORDER", "ARGUMENT_INDEX", "INHERITS_FROM_TYPE_FULL_NAME", "AST_PARENT_FULL_NAME", "AST_PARENT_TYPE",
+              "PARSER_NODE_TYPE", "PARSER_HAS_ERROR", "PARSER_MISSING", "IS_DEFINITION", "CODE_TRUNCATED"}
 
 
 def executable(settings: Settings, name: str) -> Path:
@@ -67,7 +68,8 @@ def database(dest: Path):
     return db
 
 
-def normalize(dest: Path, views: list[str]):
+def normalize(dest: Path, views: list[str], raw_directory: Path | None = None, parser_info: dict | None = None):
+    raw_directory = raw_directory or dest / "raw" / "cpg"
     (dest / "normalized").mkdir(exist_ok=True)
     temp = dest / "normalized" / "graph.pending.sqlite"
     if temp.exists():
@@ -81,15 +83,15 @@ def normalize(dest: Path, views: list[str]):
         CREATE INDEX node_label ON nodes(label);
     """)
     import json
-    fingerprint = digest({"nodes": file_hash(dest / "raw" / "cpg" / "nodes.jsonl"),
-                          "edges": file_hash(dest / "raw" / "cpg" / "edges.jsonl"), "normalizer": file_hash(Path(__file__))})
+    fingerprint = digest({"nodes": file_hash(raw_directory / "nodes.jsonl"),
+                          "edges": file_hash(raw_directory / "edges.jsonl"), "normalizer": file_hash(Path(__file__))})
     try:
-        for n in iter_jsonl(dest / "raw" / "cpg" / "nodes.jsonl"):
+        for n in iter_jsonl(raw_directory / "nodes.jsonl"):
             clean = {"id": str(n["id"]), "label": n["label"],
                      "properties": {k: v for k, v in n["properties"].items() if k in KEEP_PROPS}}
             db.execute("INSERT INTO nodes VALUES(?,?,?)", (clean["id"], clean["label"], json.dumps(clean, ensure_ascii=False)))
         db.executemany("INSERT INTO edges VALUES(?,?,?)", ((str(e["src"]), str(e["dst"]), e["label"])
-                       for e in iter_jsonl(dest / "raw" / "cpg" / "edges.jsonl")))
+                       for e in iter_jsonl(raw_directory / "edges.jsonl")))
         dangling = db.execute("SELECT count(*) FROM edges e LEFT JOIN nodes s ON s.id=e.src LEFT JOIN nodes d ON d.id=e.dst WHERE s.id IS NULL OR d.id IS NULL").fetchone()[0]
         if dangling:
             raise ValueError(f"Graph contains {dangling} dangling edges")
@@ -111,7 +113,7 @@ def normalize(dest: Path, views: list[str]):
                 db.execute("DROP TABLE IF EXISTS selected")
                 db.execute("CREATE TEMP TABLE selected(id TEXT PRIMARY KEY)")
                 db.executemany("INSERT OR IGNORE INTO selected VALUES(?)", ((n["id"],) for n in nodes()))
-                write_jsonl(dest / "raw" / view / "nodes.jsonl", (n for n in iter_jsonl(dest / "raw" / "cpg" / "nodes.jsonl")
+                write_jsonl(dest / "raw" / view / "nodes.jsonl", (n for n in iter_jsonl(raw_directory / "nodes.jsonl")
                              if db.execute("SELECT 1 FROM selected WHERE id=?", (str(n["id"]),)).fetchone()))
                 write_jsonl(dest / "raw" / view / "edges.jsonl", edges())
             write_json(dest / "normalized" / view / "index.json", {
@@ -119,6 +121,7 @@ def normalize(dest: Path, views: list[str]):
                 "nodes": sum(1 for _ in iter_jsonl(dest / "normalized" / view / "nodes.jsonl")),
                 "edges": sum(1 for _ in iter_jsonl(dest / "normalized" / view / "edges.jsonl")),
                 "dangling_edges": 0, "note": "Views share source evidence; only graph relations differ",
+                **({"parser": parser_info} if parser_info else {}),
             })
         symbols = []
         for row in db.execute("SELECT data FROM nodes WHERE label IN ('METHOD','TYPE_DECL')"):

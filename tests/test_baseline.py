@@ -28,6 +28,7 @@ class BaselineTests(unittest.TestCase):
         self.repo = self.root / "代码 仓"
         self.repo.mkdir()
         self.policy = load_policy()
+        self.policy["parser_backend"] = "joern"  # Synthetic three-view graph fixtures.
         self.policy["discovery_max_packs"] = 0
         (self.repo / "device.cpp").write_text("// 设备温度规则\nint monitor(int temperature) {\n  if (temperature > 85) return 1;\n  return 0;\n}\n", encoding="utf-8")
         self.dest = snapshot(self.repo, self.root / "out", self.policy)

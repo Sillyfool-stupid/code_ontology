@@ -7,7 +7,7 @@
 输入一个 C/C++ 仓库及必要配置，建立可追溯链条：
 
 ```text
-代码仓库 → 不可变源码快照 → Joern CPG
+代码仓库 → 不可变源码快照 → Joern CPG 或 Tree-sitter AST
         → AST / CFG / 综合 CPG 视图
         → 按函数/类型组织的证据包
         → 局部 schema → 合并固定 schema
@@ -19,7 +19,7 @@
 
 现有能力：文件驱动、阶段独立、缓存恢复、JSON/JSONL 输出、只读浏览器界面、人工抽样汇总，以及独立的分阶段按钮工作台。未实现完整 CMake 求值、全仓数据流推理、OWL/RDF 导出、自动本体推理或自然语言问答。网页只监听本机，不是生产多用户服务。
 
-工作台完整步骤见 [WORKBENCH.md](WORKBENCH.md)。激活项目 `.venv` 后运行 `python -m code_ontology.workbench --port 8766`；页面可配置路径、逐阶段执行、浏览产物和模型请求、运行六组及生成审核表。它调用原 CLI，不改变抽取逻辑。任意 tree-sitter JSON 仍需格式适配，不能直接通过页面假定支持。
+工作台完整步骤见 [WORKBENCH.md](WORKBENCH.md)。激活项目 `.venv` 后运行 `python -m code_ontology.workbench --port 8766`；页面可配置路径、逐阶段执行、浏览产物和模型请求、运行可用组合及生成审核表。内置 Tree-sitter C/C++ 解析现已接入 CLI 与工作台，详细命令见 [TREE_SITTER.md](TREE_SITTER.md)。默认 auto 在工具缺失时使用 AST；用 `configs/tree-sitter.yaml` 可强制使用，无需 Joern/Java。Tree-sitter 只运行 AST 两组，不能做 Joern 六组实验；任意外部 tree-sitter JSON 仍需格式适配。
 
 ## 2. 接手时先确认哪些信息
 

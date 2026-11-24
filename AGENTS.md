@@ -4,7 +4,7 @@
 
 开始工作先阅读 [内网 Agent 使用与接手手册](docs/INTRANET_AGENT_GUIDE.md)，按当前任务选择对应章节。人工操作的简版命令在 [CMD 运行说明](docs/RUNNING_CMD.md)。
 
-分阶段网页工作台见 [WORKBENCH.md](docs/WORKBENCH.md)：激活本项目 `.venv` 后运行 `python -m code_ontology.workbench --port 8766`。工作台有真实任务与模型按钮；不要为了检查页面而触发真实模型。任意 tree-sitter JSON 尚需适配，不假定网页可以直接导入。普通 CLI 与工作台不要并发写同一实验。
+分阶段网页工作台见 [WORKBENCH.md](docs/WORKBENCH.md)：激活本项目 `.venv` 后运行 `python -m code_ontology.workbench --port 8766`。工作台有真实任务与模型按钮；不要为了检查页面而触发真实模型。内置 Tree-sitter C/C++ AST 解析见 [TREE_SITTER.md](docs/TREE_SITTER.md)，用 `configs/tree-sitter.yaml`；仅 AST，两组 profile，无 CFG/CPG。任意外部 tree-sitter JSON 仍需适配。普通 CLI 与工作台不要并发写同一实验。
 
 执行六组基线与组织人工审核时，按 [六组基线与人工审核规程](docs/BASELINE_REVIEW.md) 固定输入、运行矩阵、采样与评分口径；交付使用 [评审报告模板](docs/templates/BASELINE_REVIEW_REPORT.md)。人工标签不能由 Agent 自评代填。
 
@@ -29,6 +29,7 @@
 |---|---|
 | `repository.py` | 文件扫描、排除、源码快照、编码、解析配置指纹 |
 | `joern.py`、`resources/export.sc` | Joern 调用、流式导图、SQLite 规范化与视图 |
+| `parsing.py`、`treesitter.py` | 后端选择与能力元数据、C/C++ 语法树、错误报告和 AST 适配 |
 | `prepare.py` | 类型/函数证据包、图上下文、预算与裁剪 |
 | `config.py` | `.env` / YAML 读取与参数校验 |
 | `llm.py` | 模型请求、JSON 修复、重试、日志、缓存 |
@@ -45,5 +46,7 @@
 修改行为后运行相关测试；完整检查用 `python -m unittest discover -s tests -v`。Joern 适配变更还应运行 `python scripts/check_demo.py --real-joern`；后者使用模拟模型接口，不代表真实模型语义质量。
 
 工作台完整编排检查为 `python scripts/check_workbench.py --real-joern`，使用真实 Joern + 本地模拟模型，包含六组与缓存续跑。Windows 进程树取消测试需在允许 taskkill 的正常进程权限下运行。
+
+无 Joern 检查为 `python scripts/check_workbench.py --tree-sitter --out outputs/tree-sitter-verification`，使用真实 grammar + 本地模拟模型，包含 AST 两组与缓存续跑。不得把语法 AST 解释成 CFG/CPG 或已解析调用；语法错误看 `raw/tree-sitter/parse_report.json`。
 
 向用户交付时说明：处理范围、实际运行命令、快照与实验路径、成功/失败、验证方式、尚未人工确认的语义问题，以及下一步可执行命令。

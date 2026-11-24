@@ -1,5 +1,7 @@
 # 每阶段的输入、输出与检查方法
 
+> 无 Joern 时可使用内置 [Tree-sitter AST 后端](TREE_SITTER.md)：`configs/tree-sitter.yaml`。仅支持 AST，实验为两种 profile 共两组；本文 Joern 的 CFG/CPG、六组与 CPG 产物说明只适用于 Joern 后端。
+
 设 `$snapshot` 为 CLI 打印的 `SNAPSHOT=...`，`$runDir` 为 `runs/<实验ID>/<视图>/<profile>`。所有源码位置相对 `$snapshot/source/`。
 
 | 阶段 | 输入 | 核心输出 | 如何判断阶段完成 | 出问题后重跑 |

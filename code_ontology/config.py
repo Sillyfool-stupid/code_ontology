@@ -91,4 +91,6 @@ def load_policy(path: str | None = None) -> dict:
     for key, allowed in (("views", {"ast", "cfg", "cpg"}), ("profiles", {"general", "maintenance"})):
         if not data[key] or not set(data[key]) <= allowed:
             raise ValueError(f"Invalid {key}")
+    if data["parser_backend"] not in {"auto", "joern", "tree-sitter"}:
+        raise ValueError("parser_backend must be auto, joern or tree-sitter")
     return data

@@ -125,6 +125,8 @@ class Pipeline:
                 self.evidence[ref["evidence_id"]] = ref
         self.state = {"created_at": now(), "view": view, "profile": profile, "experiment": experiment,
                       "settings": settings.public(), "policy": policy, "stages": {}, "source_snapshot": read_json(dest / "manifest.json")["snapshot_id"]}
+        from .parsing import snapshot_parser
+        self.state["parser"] = snapshot_parser(dest)
         write_jsonl(self.output / "evidence.jsonl", self.evidence.values())
         # A previous success must not hide a failed rerun.
         self.save_state("execution", "running")
@@ -376,6 +378,7 @@ class Pipeline:
         write_json(self.output / "final" / "schema.json", schema.model_dump())
         assertions = sum(len(final[k]) for k in ("entities", "relations", "attributes", "rules"))
         metrics = {"status": "partial" if self.errors else "success", "human_verified": False,
+                   "parser": self.state["parser"],
                    "view": self.view, "profile": self.profile, "schema_classes": len(schema.classes),
                    "schema_relations": len(schema.relations), "schema_properties": len(schema.properties),
                    **{k: len(v) for k, v in final.items()}, "conflicts": len(conflicts),
@@ -410,6 +413,8 @@ def report_run(output: Path):
 
 
 def comparison(dest: Path, experiment: str):
+    from .parsing import snapshot_parser
+    parser = snapshot_parser(dest)
     root = dest / "runs" / experiment
     reports = []
     for path in sorted(root.glob("*/*/metrics.json")):
@@ -422,7 +427,7 @@ def comparison(dest: Path, experiment: str):
                 row["previous_outputs_only"] = True
                 row["latest_attempt"] = state
         reports.append(row)
-    rows = ["# 六组基线对比", "", "概念多不等于质量高；缺失组合与失败应单独检查。", "",
+    rows = ["# AST 两组基线对比" if parser["backend"] == "tree-sitter" else "# 六组基线对比", "", "解析后端：" + parser["backend"], "", *parser["limitations"], "", "概念多不等于质量高；缺失组合与失败应单独检查。", "",
             "| 视图 | 模式 | 状态 | 概念 | 实体 | 关系 | 属性 | 规则 | 候选 | 失败 | 请求 | 缓存 |", "|---|---|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|"]
     present = set()
     for r in reports:
@@ -430,12 +435,12 @@ def comparison(dest: Path, experiment: str):
         rows.append("| " + " | ".join(str(v) for v in [r["view"], r["profile"], r["status"], r["schema_classes"],
                     r["entities"], r["relations"], r["attributes"], r["rules"], r["candidates"], r["failures"],
                     r["llm"]["requests"], r["llm"]["cache_hits"]]) + " |")
-    missing = [(v, p) for v in ("ast", "cfg", "cpg") for p in ("general", "maintenance") if (v, p) not in present]
+    missing = [(v, p) for v in parser["available_views"] for p in ("general", "maintenance") if (v, p) not in present]
     failures = [read_json(p) for p in sorted(root.glob("*/*/execution.failed.json"))]
     rows += ["", "未完成组合：" + (canonical(missing) if missing else "无"), "",
              "后续人工检查：业务意义、同义归并、领域偏离、条件遗漏、测试/现场混淆、源码是否真正支持断言。", ""]
     if failures:
         rows += ["", "最新失败记录：", "", "```json", json.dumps(failures, ensure_ascii=False, indent=2), "```", ""]
     write_text(root / "comparison.md", "\n".join(rows))
-    write_json(root / "comparison.json", {"runs": reports, "missing": missing, "failures": failures})
+    write_json(root / "comparison.json", {"runs": reports, "missing": missing, "failures": failures, "parser": parser})
     return root / "comparison.md"

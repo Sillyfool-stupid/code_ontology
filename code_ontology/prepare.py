@@ -91,6 +91,11 @@ def compact_node(node: dict) -> dict:
 
 def prepare(dest: Path, view: str, policy: dict):
     manifest = verify_sources(dest)
+    from .parsing import snapshot_parser
+    info = snapshot_parser(dest)
+    if view not in info["available_views"]:
+        raise ValueError(f"{info['backend']} snapshot supports {info['available_views']}; use --view ast or create a Joern snapshot for CFG/CPG")
+    parse_report = read_json(dest / "raw/tree-sitter/parse_report.json") if info["backend"] == "tree-sitter" else {}
     if not (dest / "normalized" / view / "index.json").exists():
         raise ValueError(f"View {view} not exported; run parse --views {view}")
     key = digest({"source": manifest["snapshot_id"], "view": view,
@@ -153,6 +158,23 @@ def prepare(dest: Path, view: str, policy: dict):
                     if not record["is_code"]:
                         units.append((file, 1, len(source(file)), {"symbol_id": "file_" + digest(file), "NAME": file,
                                                                  "kind": "DOCUMENT", "SIGNATURE": ""}, []))
+                    elif info["backend"] == "tree-sitter":
+                        # Keep macros/globals and error regions outside symbol ranges as evidence.
+                        covered = sorted((u[1], u[2]) for u in units if u[0] == file)
+                        cursor, gaps = 1, []
+                        for start, end in covered:
+                            if start > cursor:
+                                gaps.append((cursor, start - 1))
+                            cursor = max(cursor, end + 1)
+                        if cursor <= len(source(file)):
+                            gaps.append((cursor, len(source(file))))
+                        if gaps:
+                            descendants = [r[0] for r in db.execute(
+                                "SELECT id FROM nodes WHERE json_extract(data, '$.properties.FILENAME')=?", (file,))]
+                            for start, end in gaps:
+                                if "".join(source(file)[start - 1:end]).strip():
+                                    units.append((file, start, end, {"symbol_id": "file_" + digest(file), "NAME": file,
+                                                                     "kind": "FILE", "SIGNATURE": ""}, descendants))
                 for file, start, end, symbol, descendants in units:
                     if end < start:
                         continue
@@ -188,6 +210,8 @@ def prepare(dest: Path, view: str, policy: dict):
                                         neighbors.append({"edge": dict(edge), "target": compact_node(target)})
                                         neighbor_seen.add(target["id"])
                         warning = list(manifest["warnings"])
+                        if parse_report.get("syntax_errors"):
+                            warning.append(f"tree-sitter reported {parse_report['syntax_errors']} syntax errors; inspect raw/tree-sitter/parse_report.json")
                         if original_nodes > len(graph_nodes):
                             warning.append(f"graph_node_limit: {original_nodes - len(graph_nodes)} omitted")
                         scope = "test" if any(x in Path(file).parts for x in ("test", "tests")) else "example" if "examples" in Path(manifest["repo"]).parts else "code_definition"

@@ -1,4 +1,5 @@
 views: [ast, cfg, cpg]
+parser_backend: auto
 profiles: [general, maintenance]
 exclude: [.git, .venv, build, dist, outputs, third_party, vendor, node_modules, tests, test, gold.json]
 include: []

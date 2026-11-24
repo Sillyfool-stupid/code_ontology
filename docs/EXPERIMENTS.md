@@ -1,5 +1,7 @@
 # 内网实验与质量评估手册
 
+> 无 Joern 时可使用内置 [Tree-sitter AST 后端](TREE_SITTER.md)：`configs/tree-sitter.yaml`。仅支持 AST，实验为两种 profile 共两组；本文 Joern 的 CFG/CPG、六组与 CPG 产物说明只适用于 Joern 后端。
+
 本手册回答：先做哪些实验、怎样公平比较、怎样判定优劣、出了问题应回查哪个阶段。现有流水线保持不变；浏览器和人工评审工具独立读取产物。
 
 六组 B1–B6 的明确清单、CMD 批量执行/抽样命令、人工判据和源码例子见 [六组基线与人工审核操作规程](BASELINE_REVIEW.md)，评审交付可复制 [报告模板](templates/BASELINE_REVIEW_REPORT.md)。本手册的 E0–E6 是工作阶段编号，其中 E2 包含六组基线，不是另外七组基线。

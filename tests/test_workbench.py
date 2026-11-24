@@ -34,7 +34,7 @@ class WorkbenchTests(unittest.TestCase):
         self.key = "fixture-sensitive-key-never-persist"
         self.env.write_text(f"OPENAI_BASE_URL=http://127.0.0.1:1/v1\nOPENAI_MODEL=fixture-model\nOPENAI_API_KEY={self.key}\nLLM_MAX_RETRIES=0\n", encoding="utf-8")
         self.config = self.root / "policy.yaml"
-        self.config.write_text("discovery_max_packs: 24\n", encoding="utf-8")
+        self.config.write_text("discovery_max_packs: 24\nparser_backend: joern\n", encoding="utf-8")
         self.service = Workbench(self.root / "control", project=PROJECT, browse_roots=[self.root])
         self.fields = {"repo": str(self.repo), "out": str(self.root / "outputs"), "config": str(self.config),
                        "env_file": str(self.env), "view": "cpg", "profile": "maintenance", "experiment": "test-01"}
@@ -83,7 +83,7 @@ class WorkbenchTests(unittest.TestCase):
         self.assertEqual(j["state"], "failed")
         self.assertEqual(j["exit_code"], 2)
         self.assertNotEqual(j["snapshot"], str(snap))
-        self.assertIn("本次未运行 Joern", self.service.logs(j["id"])["text"])
+        self.assertIn("本次未运行解析器", self.service.logs(j["id"])["text"])
 
     def test_real_subprocess_stages_with_synthetic_api_and_resume(self):
         with fake_server() as (url, transport):

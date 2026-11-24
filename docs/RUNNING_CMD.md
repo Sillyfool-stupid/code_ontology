@@ -1,5 +1,10 @@
 # Windows CMD 完整运行说明
 
+## 无 Joern 环境入口
+
+使用 `configs/tree-sitter.yaml`，CLI 与工作台均支持内置 C/C++ AST 解析。完整 CMD 命令见 [Tree-sitter 使用方法](TREE_SITTER.md)。本文后续 CFG/CPG 和六组示例需要 Joern；Tree-sitter 请使用 `--view ast`，实验为 AST 两组。
+
+
 适用于命令提示符 CMD。所有命令按行执行，不要复制 PowerShell 的 `$py`、`&` 或反引号。先激活虚拟环境，后续统一使用 `python`。每次新开 CMD 都需要重新激活。项目在入口处设置 UTF-8 终端输出，文件读写也显式指定编码，无需每次加编码参数。
 
 ## 1. 进入项目并检查环境

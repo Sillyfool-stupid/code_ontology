@@ -19,6 +19,7 @@ import yaml
 
 from .config import PROJECT, RESOURCE, Settings, load_policy, load_settings
 from .pipeline import prompt
+from .parsing import select_backend, snapshot_parser
 from .prepare import __file__ as prepare_implementation
 from .util import canonical, digest, file_hash, now, read_json, within, write_json
 from .workbench_files import Preview, checked, listing
@@ -139,6 +140,9 @@ class Workbench:
             envfile = Path(fields.get("env_file") or self.project / ".env").resolve()
             policy = load_policy(str(config))
             settings = load_settings(str(envfile))
+            info = snapshot_parser(Path(snap)) if snap else select_backend(policy, settings)
+            if view not in info["available_views"]:
+                view = "ast"
             w = {"id": wid, "name": str(fields.get("name") or experiment)[:100], "repo": str(repo), "out": str(out),
                  "config": str(config), "env_file": str(envfile), "snapshot": snap,
                  "view": view, "profile": profile, "experiment": experiment,
@@ -159,7 +163,7 @@ class Workbench:
     def fingerprint(self, w, policy, settings, stage="experiment"):
         directory = Path(policy.get("prompt_dir") or RESOURCE / "prompts")
         prompts = {str(p.relative_to(directory)): file_hash(p) for p in directory.rglob("*.txt")}
-        scan_keys = ("include", "exclude", "includes", "defines", "encoding_fallback", "max_files", "max_file_bytes", "compile_commands")
+        scan_keys = ("include", "exclude", "includes", "defines", "encoding_fallback", "max_files", "max_file_bytes", "compile_commands", "parser_backend")
         pack_keys = ("pack_tokens", "neighbor_limit", "graph_nodes_per_pack")
         def stamp(path):
             if not path or not path.is_file():
@@ -172,9 +176,9 @@ class Workbench:
         schema = file_hash(run / "schema" / "schema.json") if run and (run / "schema" / "schema.json").is_file() else None
         base = {"snapshot": w["snapshot"], "view": w["view"], "profile": w["profile"], "experiment": w["experiment"]}
         if stage in {"doctor", "connection"}:
-            return digest({"stage": stage, "settings": settings.public()})
+            return digest({"stage": stage, "settings": settings.public(), "parser": select_backend(policy, settings)})
         if stage in {"scan", "parse"}:
-            return digest({"snapshot": w["snapshot"], "policy": {k: policy[k] for k in scan_keys}, "joern_home": settings.joern_home})
+            return digest({"snapshot": w["snapshot"], "policy": {k: policy[k] for k in scan_keys}, "parser": select_backend(policy, settings), "joern_home": settings.joern_home})
         if stage == "prepare":
             return digest({**base, "graph": graph, "pack_policy": {k: policy[k] for k in pack_keys}})
         if stage in {"discover", "extract"}:
@@ -225,6 +229,8 @@ class Workbench:
         required = []
         if stage in {"parse", "prepare", "discover", "extract", "validate", "evaluate", "report", "sample", "summarize"} and not snap:
             return ["请先扫描/解析或选择已有快照"]
+        if snap and stage in {"prepare", "discover", "extract", "validate"} and w["view"] not in snapshot_parser(snap)["available_views"]:
+            return ["当前快照仅支持 AST，请保存工作区以切换视图"]
         if stage in {"prepare", "discover", "extract"}:
             required += [snap / "normalized" / w["view"] / "index.json"]
         if stage in {"discover", "extract", "validate"}:
@@ -255,18 +261,19 @@ class Workbench:
     def describe(self, wid):
         w = self.workspace(wid)
         policy, settings = self.settings(w)
+        info = snapshot_parser(Path(w["snapshot"])) if w["snapshot"] else select_backend(policy, settings)
         fingerprint = self.fingerprint(w, policy, settings)
         jobs = self.jobs(wid)
         stages = []
         for key, label, model in STAGES:
             latest = next((j for j in jobs if j["stage"] == key), None)
             problems = self._requirements(key, w)
-            stages.append({"id": key, "label": label, "model": model, "blocked": problems,
+            stages.append({"id": key, "label": "运行 AST 两组基线" if key == "experiment" and info["backend"] == "tree-sitter" else label, "model": model, "blocked": problems,
                            "inputs": self.stage_inputs(key, w),
                            "job": latest, "stale": bool(latest and (latest["fingerprint"] != self.fingerprint(w, policy, settings, key)
                                                                     or latest.get("schema_prompt_matches") is False))})
         roots = self.roots(w)
-        return {"workspace": w, "settings": settings.public(), "policy": policy, "fingerprint": fingerprint,
+        return {"workspace": w, "settings": settings.public(), "policy": policy, "parser": info, "fingerprint": fingerprint,
                 "stages": stages, "jobs": jobs, "roots": {k: str(v) for k, v in roots.items()},
                 "prompts": {stage: prompt(policy, w["profile"], stage) for stage in ("discover", "merge", "extract")},
                 "prompt_sources": {stage: (Path(policy.get("prompt_dir") or RESOURCE / "prompts") / w["profile"] / f"{stage}.txt").read_text(encoding="utf-8") for stage in ("discover", "merge", "extract")}}
@@ -502,8 +509,10 @@ class Workbench:
         elif stage == "scan":
             files = [snap / "manifest.json"] if snap else []
         elif stage == "parse" and snap:
-            files = [snap / "raw/cpg.bin", snap / "raw/cpg/export.json"]
-            files += [snap / "normalized" / v / "index.json" for v in ("ast", "cfg", "cpg")]
+            info = snapshot_parser(snap)
+            files = ([snap / "raw/tree-sitter" / n for n in ("nodes.jsonl", "edges.jsonl", "export.json", "parse_report.json")]
+                     if info["backend"] == "tree-sitter" else [snap / "raw/cpg.bin", snap / "raw/cpg/export.json"])
+            files += [snap / "normalized" / v / "index.json" for v in info["available_views"]]
         elif stage == "prepare" and snap:
             files = [snap / "prepared" / w["view"] / n for n in ("packs.jsonl", "index.json")]
         elif stage == "discover" and run:
@@ -517,7 +526,7 @@ class Workbench:
             files = [snap / "runs" / w["experiment"] / n for n in ("comparison.json", "comparison.md")]
             if stage == "experiment":
                 files += [snap / "runs" / w["experiment"] / v / p / "metrics.json"
-                          for v in ("ast", "cfg", "cpg") for p in ("general", "maintenance")]
+                          for v in snapshot_parser(snap)["available_views"] for p in ("general", "maintenance")]
         elif stage in {"sample", "summarize"}:
             suffix = ".csv" if stage == "sample" else ".summary.json"
             files = [r["reviews"] / f"{w['view']}-{w['profile']}{suffix}"]
@@ -583,6 +592,8 @@ class Workbench:
                 if Path(m["repo"]).resolve() != Path(w["repo"]):
                     raise ValueError("快照来源仓库不一致")
                 w["snapshot"] = str(target)
+                if w["view"] not in snapshot_parser(target)["available_views"]:
+                    w["view"] = "ast"
                 self._save_workspace(w)
                 self.update_job(jid, snapshot=str(target))
             state = "succeeded" if code == 0 else "failed"
