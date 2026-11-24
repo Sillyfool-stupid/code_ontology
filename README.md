@@ -15,6 +15,8 @@ python -m code_ontology run --repo examples/maintenance --config configs/tree-si
 
 最后一条使用 `.env` 中的模型；前面的诊断和解析不调用模型。完整安装、独立阶段、AST 两组实验、工作台与产物说明见 **[Tree-sitter 使用方法](docs/TREE_SITTER.md)**。Tree-sitter 只提供语法结构，不产生 CFG、CPG、调用解析或数据流。
 
+100 个 cpp、50 个 h、7 万行（5.6 万有效代码行）的模拟仓库生成、实测结果与大模型方案评估见 **[规模测试与抽取策略评估](docs/SCALE_TEST_150.md)**。测试使用真实 Tree-sitter 和本地模拟模型接口，不代表真实模型的语义准确率。
+
 **内网交给 Agent 接手时：先读 [AGENTS.md](AGENTS.md)，再读 [内网 Agent 使用与接手手册](docs/INTRANET_AGENT_GUIDE.md)。手册末尾附有可直接复制的接手提示词。**
 
 支持通用 `general` 和设备运维 `maintenance` 两种提示词。Joern 三种视图共六组组合；Tree-sitter AST 共两组组合，报告按实际后端列出可用组合。
