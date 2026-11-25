@@ -153,6 +153,7 @@ def make_server(state=None, port=8766, project=PROJECT, browse_roots=None):
             name, rid = path.removeprefix("/viewer-api/"), a.get("id", "")
             if name == "runs": data = store.listing()
             elif name == "run": data = store.detail(rid)
+            elif name == "schema-snapshot": data = store.schema_snapshot(rid, a.get("path", ""))
             elif name == "records": data = store.records(rid, a.get("kind", "entities"), int(a.get("offset", 0)), int(a.get("limit", 50)), a.get("q", ""))
             elif name == "evidence": data = store.evidence(rid, a["evidence_id"])
             elif name == "artifact": data = store.artifact(rid, a["name"])

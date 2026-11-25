@@ -23,6 +23,7 @@ class Settings:
     temperature: float = 0
     context_tokens: int = 16384
     max_output_tokens: int = 4096
+    send_max_tokens: bool = True
     json_mode: str = "auto"
     joern_home: str = ""
     ca_bundle: str = ""
@@ -51,6 +52,12 @@ def env_values(env_file=None):
     return {**(dotenv_values(path) if path.is_file() else {}), **os.environ}
 
 
+def parse_bool(value):
+    if value.lower() not in {"true", "false", "1", "0", "yes", "no"}:
+        raise ValueError("Boolean configuration must be true/false, 1/0 or yes/no")
+    return value.lower() in {"true", "1", "yes"}
+
+
 def load_settings(env_file: str | None = None) -> Settings:
     values = env_values(env_file)
     mapping = {
@@ -61,12 +68,14 @@ def load_settings(env_file: str | None = None) -> Settings:
         "max_output_tokens": ("LLM_MAX_OUTPUT_TOKENS", int), "json_mode": ("LLM_JSON_MODE", str),
         "joern_home": ("JOERN_HOME", str), "ca_bundle": ("LLM_CA_BUNDLE", str),
         "thinking": ("LLM_THINKING", str),
+        "send_max_tokens": ("LLM_SEND_MAX_TOKENS", parse_bool),
     }
     result = Settings(**{k: cast(values[key]) for k, (key, cast) in mapping.items() if values.get(key) not in (None, "")})
-    for stage in ("discover", "merge", "extract"):
+    for stage in ("discover", "merge", "review", "extract"):
         overrides = {}
         for attr, suffix, cast in (("context_tokens", "CONTEXT_TOKENS", int), ("max_output_tokens", "MAX_OUTPUT_TOKENS", int),
-                                   ("timeout", "TIMEOUT_SECONDS", float), ("retries", "MAX_RETRIES", int), ("concurrency", "CONCURRENCY", int)):
+                                   ("timeout", "TIMEOUT_SECONDS", float), ("retries", "MAX_RETRIES", int), ("concurrency", "CONCURRENCY", int),
+                                   ("send_max_tokens", "SEND_MAX_TOKENS", parse_bool)):
             value = values.get(f"LLM_{stage.upper()}_{suffix}")
             if value not in (None, ""):
                 overrides[attr] = cast(value)
@@ -105,6 +114,8 @@ POLICY_ENV = {
     "discovery_max_packs": ("CO_DISCOVERY_SAMPLE_LIMIT", int), "batch_packs": ("CO_DISCOVERY_BATCH_PACKS", int),
     "merge_batch_items": ("CO_MERGE_BATCH_ITEMS", int), "merge_max_rounds": ("CO_MERGE_MAX_ROUNDS", int),
     "recovery_max_depth": ("CO_RECOVERY_MAX_DEPTH", int),
+    "review_batch_items": ("CO_REVIEW_BATCH_ITEMS", int), "review_max_rounds": ("CO_REVIEW_MAX_ROUNDS", int),
+    "allow_unreviewed_schema": ("CO_ALLOW_UNREVIEWED_SCHEMA", parse_bool),
 }
 
 
@@ -136,7 +147,7 @@ def load_policy(path: str | None = None, env_file: str | None = None, frozen=Fal
         data["discovery_max_packs"] = 0
     if data["output_language"] not in {"mixed", "en", "zh"}:
         raise ValueError("CO_OUTPUT_LANGUAGE must be mixed/en/zh")
-    for key in ("pack_tokens", "graph_nodes_per_pack", "batch_packs", "merge_max_rounds", "merge_batch_items", "recovery_max_depth", "joern_timeout", "max_file_bytes"):
+    for key in ("pack_tokens", "graph_nodes_per_pack", "batch_packs", "merge_max_rounds", "merge_batch_items", "recovery_max_depth", "joern_timeout", "max_file_bytes", "review_batch_items", "review_max_rounds"):
         if not isinstance(data[key], int) or data[key] <= 0:
             raise ValueError(f"{key} must be a positive integer")
     for key in ("neighbor_limit", "discovery_max_packs", "max_files"):

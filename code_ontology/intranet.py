@@ -13,7 +13,7 @@ import time
 from .config import PROJECT, env_values, load_policy, load_settings, configuration_sources
 from .util import digest, now, read_json, write_json, file_hash
 
-STEPS = ("scan", "parse", "normalize", "prepare", "discover-local", "merge-schema", "extract", "finalize", "validate", "report")
+STEPS = ("scan", "parse", "normalize", "prepare", "discover-local", "merge-schema", "review-schema", "extract", "finalize", "validate", "report")
 
 
 @contextmanager
@@ -87,8 +87,8 @@ def stage_fingerprint(step, session, settings, policy):
             data["graph_index"] = stamp(snap / "normalized" / view / "index.json") if snap else None
     else:
         data["packs"] = stamp(snap / "prepared" / view / "index.json") if snap else None
-        if step in {"discover-local", "merge-schema", "extract", "finalize"}:
-            stage = {"discover-local": "discover", "merge-schema": "merge", "finalize": "extract", "extract": "extract"}[step]
+        if step in {"discover-local", "merge-schema", "review-schema", "extract", "finalize"}:
+            stage = {"discover-local": "discover", "merge-schema": "merge", "review-schema": "review", "finalize": "extract", "extract": "extract"}[step]
             data["settings"] = settings.for_stage(stage).public()
             data["prompt"] = prompt(policy, profile, stage)
             data["recovery"] = policy["recovery_max_depth"]
@@ -97,8 +97,13 @@ def stage_fingerprint(step, session, settings, policy):
             if stage == "merge":
                 data["local"] = stamp(run / "schema/local-manifest.json") if run else None
                 data["batch"] = policy["merge_batch_items"]
+            if stage == "review":
+                data["draft"] = stamp(run / "schema/draft-schema.json") if run else None
+                data["mapping"] = stamp(run / "schema/draft-source-mapping.json") if run else None
+                data["review"] = [policy["review_batch_items"], policy["review_max_rounds"]]
             if step in {"extract", "finalize"}:
                 data["schema"] = stamp(run / "schema/schema.json") if run else None
+                data["allow_unreviewed_schema"] = policy["allow_unreviewed_schema"]
         if step in {"finalize", "validate", "report"}:
             data["extraction"] = stamp(run / "extraction/manifest.json") if run else None
     return digest(data)
@@ -159,20 +164,19 @@ def execute(step, session, settings, policy):
                 pipeline.discover_local()
             elif step == "merge-schema":
                 pipeline.merge_schema()
+            elif step == "review-schema":
+                pipeline.review_schema()
             elif step == "extract":
                 state = run / "schema" / "merge-status.json"
                 supplied = session.get("schema_file")
                 if not supplied and (not state.is_file() or read_json(state).get("state") != "success"):
                     raise ValueError("Run merge-schema successfully first")
                 if not supplied:
-                    from .stages import SchemaStages
-                    checker = SchemaStages(pipeline, "merge")
-                    try:
-                        checker.verify_merged()
-                    finally:
-                        checker.close()
+                    from .schema_review import check_schema_use
+                    review_state = check_schema_use(pipeline)
                 schema = pipeline.fixed_schema(Path(supplied) if supplied else run / "schema" / "schema.json")
                 write_json(run / "schema-scope.json", {"source": supplied or "merged",
+                           "review_state": "explicit_schema_selection" if supplied else review_state,
                            "note": "Explicit schema selection; not proof of complete global alignment" if supplied else "Merged schema for selected discovery scope"})
                 if not pipeline.extract(schema, finalize=False):
                     return 1
@@ -216,7 +220,7 @@ def main(argv=None):
             print(json.dumps({"env_file": str(envpath), "priority": "CLI > system env > .env > YAML > defaults",
                               "policy": policy, "settings": settings.public(),
                               "sources": configuration_sources(str(envpath), args.config),
-                              "stages": {s: settings.for_stage(s).public() for s in ("discover", "merge", "extract")}}, ensure_ascii=False, indent=2))
+                              "stages": {s: settings.for_stage(s).public() for s in ("discover", "merge", "review", "extract")}}, ensure_ascii=False, indent=2))
             return 0
         if args.step == "status":
             if not path.is_file():
@@ -228,9 +232,11 @@ def main(argv=None):
                     record["display_state"] = "stale"
             print(json.dumps(session, ensure_ascii=False, indent=2))
             if session.get("snapshot"):
-                status = Path(session["snapshot"]) / "runs" / name / session["view"] / session["profile"] / "schema" / "merge-status.json"
-                if status.is_file():
-                    print("MERGE:", status.read_text(encoding="utf-8"))
+                schema_root = Path(session["snapshot"]) / "runs" / name / session["view"] / session["profile"] / "schema"
+                for label, filename in (("MERGE", "merge-status.json"), ("REVIEW", "review-status.json")):
+                    status = schema_root / filename
+                    if status.is_file():
+                        print(label + ":", status.read_text(encoding="utf-8"))
             return 0
         with writer_lock(out):
             if args.step == "init":

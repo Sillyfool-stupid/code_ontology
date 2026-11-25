@@ -25,11 +25,20 @@ def fixture_server():
             state["stages"].append(stage)
             if stage == "merge":
                 evidence = sorted({eid for s in payload["candidates"] for c in s["classes"] for eid in c["evidence_ids"]})
+            elif stage == "review":
+                evidence = []
             else:
                 evidence = sorted({eid for p in payload["packs"] for eid in p["evidence_ids"]})
             if stage in {"discover", "merge"}:
                 result = {"classes": [{"id": "fixture", "name": "FixtureConcept", "definition": "Synthetic transport check only",
                                       "evidence_ids": evidence}], "relations": [], "properties": []}
+                if stage == "merge":
+                    result = {"ontology": result, "source_mapping": [
+                        {"source_id": c["id"], "target_id": "fixture", "action": "merge", "reason": "Same synthetic fixture concept"}
+                        for s in payload["candidates"] for c in s["classes"]]}
+            elif stage == "review":
+                result = {"ontology": payload["current_schema"], "source_mapping": [
+                    item["current_mapping"] for item in payload["source_items"]], "issues": []}
             else:
                 classes = payload["schema"]["classes"]
                 result = {"entities": [{"id": "fixture", "name": "FixtureEntity", "type_id": classes[0]["id"],
@@ -64,7 +73,8 @@ def run(root: Path):
         from .config import RESOURCE
         policy = yaml.safe_load((RESOURCE / "default.yaml").read_text(encoding="utf-8"))
         policy.update(parser_backend="tree-sitter", views=["ast"], profiles=["general"], discovery_max_packs=0)
-        settings = Settings(base_url=url, api_key="offline-fixture-only", model="offline-fixture", retries=0)
+        settings = Settings(base_url=url, api_key="offline-fixture-only", model="offline-fixture", retries=0,
+                            context_tokens=256000, max_output_tokens=8192)
         session = {"repo": str(PROJECT / "examples/maintenance"), "out": str(work / "out"),
                    "experiment": "offline-fixture", "view": "ast", "profile": "general"}
         with writer_lock(Path(session["out"])):
@@ -73,6 +83,7 @@ def run(root: Path):
                     return 1
             before = state["requests"]
             execute("merge-schema", session, settings, policy)
+            execute("review-schema", session, settings, policy)
             execute("extract", session, settings, policy)
             assert state["requests"] == before, "Identical merge/extract unexpectedly requested model again"
         report = {"ok": True, "mode": "real-tree-sitter-local-fake-model", "semantic_quality_tested": False,

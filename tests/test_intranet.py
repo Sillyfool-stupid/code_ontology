@@ -16,7 +16,7 @@ from code_ontology.prepare import prepare
 from code_ontology.parsing import parse_repository, normalize_repository
 from code_ontology.repository import snapshot
 from code_ontology.util import read_json, write_json, now
-from tests.fake_api import fake_server
+from tests.fake_api import fake_server, fixture_response
 
 
 class IntranetTests(unittest.TestCase):
@@ -58,6 +58,33 @@ class IntranetTests(unittest.TestCase):
             self.assertEqual(load_policy(env_file=str(self.env))["output_language"], "mixed")
         self.assertTrue(now().endswith("+08:00"))
 
+    def test_optional_output_cap_transport_and_stage_override(self):
+        from code_ontology.llm import LLM, BudgetError
+        self.env.write_text('LLM_SEND_MAX_TOKENS=false\nLLM_MERGE_SEND_MAX_TOKENS=true\n', encoding="utf-8")
+        settings = load_settings(str(self.env))
+        self.assertFalse(settings.for_stage("discover").send_max_tokens)
+        self.assertTrue(settings.for_stage("merge").send_max_tokens)
+        with fake_server() as (url, state):
+            for send in (False, True):
+                llm = LLM(replace(settings, base_url=url, model="fixture", send_max_tokens=send), self.root / "cap-cache")
+                try:
+                    llm._request([{"role": "user", "content": "{}"}], self.root / "traces", str(send))
+                    self.assertEqual("max_tokens" in state["payloads"][-1], send)
+                    self.assertNotIn("max_completion_tokens", state["payloads"][-1])
+                    self.assertFalse(llm.fits([{"role": "user", "content": "x" * 20000}]))
+                finally:
+                    llm.close()
+        with fake_server(mode="truncated") as (url, state):
+            llm = LLM(replace(settings, base_url=url, model="fixture", send_max_tokens=False), self.root / "length-cache")
+            try:
+                with self.assertRaises(BudgetError):
+                    llm._request([{"role": "user", "content": "{}"}], self.root / "traces", "length")
+            finally:
+                llm.close()
+        self.env.write_text('LLM_SEND_MAX_TOKENS=invalid\n', encoding="utf-8")
+        with self.assertRaises(ValueError):
+            load_settings(str(self.env))
+
     def test_merge_timeout_resume_does_not_rediscover(self):
         with fake_server() as (url, state):
             settings = Settings(base_url=url, model="fixture", retries=0)
@@ -69,11 +96,23 @@ class IntranetTests(unittest.TestCase):
                 with self.assertRaises(RequestUnknown):
                     pipeline.merge_schema()
                 self.assertEqual(read_json(pipeline.output / "schema/merge-status.json")["state"], "partial")
+                first_history = Path(read_json(pipeline.output / "schema/merge-status.json")["history"])
+                self.assertTrue((first_history / "round-001/batch-001/result/schema.json").is_file())
+                self.assertEqual(read_json(first_history / "manifest.json")["state"], "partial")
+                first_schema = read_json(first_history / "round-001/batch-001/result/schema.json")
                 calls = state["stage_counts"]["merge"]
                 pipeline.merge_schema()
                 # First successful merge batch is a checkpoint, only failed/later batches request again.
                 self.assertEqual(state["stage_counts"]["merge"] - calls, 2)
                 self.assertEqual(state["stage_counts"]["discover"], discovers)
+                second_history = Path(read_json(pipeline.output / "schema/merge-status.json")["history"])
+                self.assertNotEqual(first_history, second_history)
+                self.assertEqual(read_json(first_history / "round-001/batch-001/result/schema.json"), first_schema)
+                round_files = list(second_history.glob("round-*/result/schema*.json"))
+                self.assertGreaterEqual(len(round_files), 2)
+                for saved in round_files:
+                    from code_ontology.models import Ontology
+                    Ontology.model_validate(read_json(saved))
                 before = state["requests"]
                 pipeline.merge_schema()
                 self.assertEqual(state["requests"], before)
@@ -91,6 +130,7 @@ class IntranetTests(unittest.TestCase):
             try:
                 pipeline.merge_schema()
                 self.assertEqual(state["stage_counts"]["discover"], before)
+                pipeline.review_schema()
                 schema = pipeline.fixed_schema()
                 self.assertTrue(pipeline.extract(schema, finalize=False))
                 self.assertFalse((pipeline.output / "final").exists())
@@ -239,6 +279,139 @@ class IntranetTests(unittest.TestCase):
                     runner.close()
             finally:
                 pipeline.close()
+
+    def test_draft_is_saved_with_alignment_issues_and_ai_review_repairs_it(self):
+        self.policy["review_batch_items"] = 1
+        def factory(payload):
+            value = fixture_response(payload)
+            if payload["stage"] == "discover":
+                value["properties"] = [{"id": "hours", "name": "hours", "definition": "Operating hours", "domain": ["device"],
+                                        "datatype": "number", "unit": "hours", "evidence_ids": value["classes"][0]["evidence_ids"]}]
+            elif payload["stage"] == "merge":
+                evidence = value["ontology"]["classes"][0]["evidence_ids"]
+                value["ontology"]["properties"] = [{"id": "hours", "name": "hours", "definition": "Operating hours", "domain": ["device"],
+                                                     "datatype": "integer", "unit": "hours", "evidence_ids": evidence}]
+                value["source_mapping"] += [{"source_id": r["id"], "target_id": "hours", "action": "merge", "reason": "Fixture narrowing error"}
+                                            for s in payload["candidates"] for r in s["properties"]]
+            elif payload["stage"] == "review":
+                for row in value["ontology"]["properties"]:
+                    row["datatype"] = "number"
+                context_sources = [payload["class_context"][0]["item"]["id"]] if payload["class_context"] else []
+                value["issues"] = [{"source_ids": context_sources, "target_ids": [], "severity": "warning", "status": "fixed", "description": "Widened number without losing values; checked source class context"}]
+                present = {m["source_id"] for m in value["source_mapping"]}
+                value["source_mapping"] += [c["current_mapping"] for c in payload["class_context"] if c["item"]["id"] not in present]
+            return value
+        with fake_server() as (url, state):
+            state["response_factory"] = factory
+            pipeline = self.pipeline(Settings(base_url=url, model="fixture", retries=0, context_tokens=65536))
+            try:
+                pipeline.discover_local(); pipeline.merge_schema()
+                root = pipeline.output / "schema"
+                self.assertTrue((root / "schema.json").is_file())
+                self.assertGreater(read_json(root / "merge-status.json")["alignment_issues"], 0)
+                from code_ontology.schema_review import check_schema_use
+                with self.assertRaisesRegex(ValueError, "review-schema"):
+                    check_schema_use(pipeline)
+                pipeline.policy["allow_unreviewed_schema"] = True
+                self.assertEqual(check_schema_use(pipeline), "explicit_unreviewed_override")
+                pipeline.policy["allow_unreviewed_schema"] = False
+                pipeline.review_schema()
+                self.assertEqual(read_json(root / "schema.json")["properties"][0]["datatype"], "number")
+                self.assertEqual(read_json(root / "draft-schema.json")["properties"][0]["datatype"], "integer")
+                self.assertEqual(check_schema_use(pipeline), "ai_reviewed_not_human_verified")
+                self.assertEqual(read_json(root / "review-status.json")["state"], "success")
+                report = read_json(root / "review-report.json")
+                published = read_json(root / "schema.json")
+                target_ids = {r["id"] for cat in ("classes", "relations", "properties") for r in published[cat]}
+                self.assertEqual(set(report["publication_id_mapping"].values()), target_ids)
+            finally:
+                pipeline.close()
+
+    def test_review_timeout_resume_and_parameter_change_do_not_repeat_discovery(self):
+        self.policy["review_batch_items"] = 1
+        with fake_server() as (url, state):
+            pipeline = self.pipeline(Settings(base_url=url, model="fixture", retries=0))
+            try:
+                pipeline.discover_local(); pipeline.merge_schema()
+                discovers = state["stage_counts"]["discover"]
+                state["fail_review_on"] = 2
+                with self.assertRaises(RequestUnknown):
+                    pipeline.review_schema()
+                previous_history = Path(read_json(pipeline.output / "schema/review-status.json")["history"])
+                self.assertTrue((previous_history / "round-001/batch-001/result/schema.json").is_file())
+                before = state["stage_counts"]["review"]
+                pipeline.review_schema()
+                current_history = Path(read_json(pipeline.output / "schema/review-status.json")["history"])
+                self.assertNotEqual(previous_history, current_history)
+                self.assertTrue((current_history / "round-001/result/schema.json").is_file())
+                self.assertTrue((current_history / "final/schema.json").is_file())
+                self.assertEqual(state["stage_counts"]["review"] - before, 3)
+                self.assertEqual(state["stage_counts"]["discover"], discovers)
+                before = state["requests"]
+                pipeline.review_schema()
+                self.assertEqual(state["requests"], before)
+                from code_ontology.schema_review import check_schema_use
+                pipeline.settings = replace(pipeline.settings, stage_overrides={"review": {"timeout": 300}})
+                with self.assertRaisesRegex(ValueError, "configuration changed"):
+                    check_schema_use(pipeline)
+            finally:
+                pipeline.close()
+
+    def test_extraction_repair_explains_pack_evidence_boundary(self):
+        from code_ontology.models import Ontology
+        with fake_server() as (url, state):
+            pipeline = self.pipeline(Settings(base_url=url, model="fixture", retries=0))
+            try:
+                first_pack = pipeline.packs[0]
+                wrong_evidence = pipeline.packs[1]["evidence_ids"][0]
+                def factory(payload):
+                    value = fixture_response(payload)
+                    if payload.get("stage") == "extract" and payload["packs"][0]["pack_id"] == first_pack["pack_id"] and not state.get("bad_sent"):
+                        value["entities"][0]["evidence_ids"] = [wrong_evidence]
+                        state["bad_sent"] = True
+                    return value
+                state["response_factory"] = factory
+                schema = Ontology.model_validate(fixture_response({"stage": "discover", "packs": pipeline.packs}))
+                self.assertTrue(pipeline.extract(schema, finalize=False))
+                repairs = [r["messages"][-1]["content"] for r in state["payloads"] if len(r["messages"]) > 2]
+                self.assertEqual(len(repairs), 1)
+                self.assertIn(first_pack["evidence_ids"][0], repairs[0])
+                self.assertIn("type provenance", repairs[0])
+                self.assertIn("otherwise remove", repairs[0])
+            finally:
+                pipeline.close()
+
+    def test_review_second_round_only_revisits_pending_sources(self):
+        self.policy["review_batch_items"] = 3
+        def factory(payload):
+            value = fixture_response(payload)
+            if payload["stage"] == "discover":
+                value["properties"] = [{"id": "hours", "name": "hours", "definition": "Operating hours", "domain": ["device"],
+                    "datatype": "number", "evidence_ids": value["classes"][0]["evidence_ids"]}]
+            elif payload["stage"] == "merge":
+                value["ontology"]["properties"] = [{"id": "hours", "name": "hours", "definition": "Operating hours", "domain": ["device"],
+                    "datatype": "integer", "evidence_ids": value["ontology"]["classes"][0]["evidence_ids"]}]
+                value["source_mapping"] += [{"source_id": r["id"], "target_id": "hours", "action": "merge", "reason": "Synthetic narrowing"}
+                    for s in payload["candidates"] for r in s["properties"]]
+            elif payload["stage"] == "review" and "review_focus" in payload:
+                value["ontology"]["properties"][0]["datatype"] = "number"
+            return value
+        with fake_server() as (url, state):
+            state["response_factory"] = factory
+            pipeline = self.pipeline(Settings(base_url=url, model="fixture", retries=0, context_tokens=65536))
+            try:
+                pipeline.discover_local(); pipeline.merge_schema(); pipeline.review_schema()
+                self.assertEqual(state["stage_counts"]["review"], 5)  # 8 sources, then only 4 pending
+                self.assertEqual(read_json(pipeline.output / "schema/review-status.json")["state"], "success")
+            finally:
+                pipeline.close()
+
+    def test_portable_smoke_runs_all_stages_and_resumes_without_model_cost(self):
+        with redirect_stdout(io.StringIO()), redirect_stderr(io.StringIO()):
+            self.assertEqual(main(["smoke", "--out", str(self.root / "portable")]), 0)
+        report = read_json(self.root / "portable/smoke/verification.json")
+        self.assertTrue(report["ok"])
+        self.assertEqual(report["resume_extra_requests"], 0)
 
 
 if __name__ == "__main__":

@@ -1,52 +1,33 @@
 # 代码业务本体抽取基线
 
-**内网逐步运行推荐入口**：常用参数集中在 `.env`，使用 `scripts\intranet.bat init` 初始化，再逐步执行 `scan`、`parse`、`normalize`、`prepare`、`discover-local`、`merge-schema`、`extract`、`finalize`、`validate`、`report`。Schema 合并可独立续跑；中英文输出并存。配置、阶段产物、截断/超时恢复及内网自检见 **[内网短命令与独立合并](docs/INTRANET_STEPS.md)**。旧 CLI/YAML 仍兼容。
+## 文档入口
 
-输入一个 C/C++ 仓库路径，使用 **Joern（AST/CFG/综合 CPG）或 Tree-sitter（AST）→ 证据包 → LLM 发现 schema → 合并固定 schema → 实例抽取 → 校验和对比报告**。
+现有功能整理为 6 份使用与维护文档，另有一份后续改进想法，按任务选择：
 
-**没有 Joern 时可直接使用 Tree-sitter，无需 Java 或编译器。** 默认 `parser_backend: auto` 优先 Joern，找不到工具时使用 Tree-sitter AST；也可用 `--parser-backend tree-sitter` 强制选择。安装依赖后最短命令：
+| 文档 | 什么时候看 |
+|---|---|
+| [使用指南](docs/使用指南.md) | 首次安装、.env 配置、Joern AST/CFG/CPG 与 Tree-sitter AST 的完整逐步命令、产物位置、合并恢复 |
+| [网页操作](docs/网页操作.md) | 网页逐步执行、查看解析结果和模型请求、浏览本体与源码证据 |
+| [项目架构与产物](docs/项目架构与产物.md) | 理解抽取原理、数据格式、缓存和代码位置 |
+| [测试与评审](docs/测试与评审.md) | 自动化验证、六组基线、公平比较、人工评分及报告模板 |
+| [规模测试](docs/规模测试.md) | 100 个 cpp + 50 个 h 模拟仓库、7 万行规模实测与模型策略评估 |
+| [维护与排障](docs/维护与排障.md) | 内网离线迁移、故障处理和 Agent 接手 |
+| [改进想法](docs/改进想法.md) | 基础 AI 审查已实现；独立模型、定向审查与业务验收的后续想法 |
 
-```bat
-call .venv\Scripts\activate.bat
-python -m pip install -r requirements.lock.txt
-python -m pip install -e .
-python -m code_ontology doctor --parser-backend tree-sitter --no-llm
-python -m code_ontology parse --repo examples/maintenance --config configs/tree-sitter.yaml
-python -m code_ontology run --repo examples/maintenance --config configs/tree-sitter.yaml --profile maintenance --experiment ts-smoke-01 --env-file .env
-```
+日常建议从使用指南开始；旧版 CLI 与 YAML 保留兼容，下面的项目介绍包含历史 CLI 示例。
 
-最后一条使用 `.env` 中的模型；前面的诊断和解析不调用模型。完整安装、独立阶段、AST 两组实验、工作台与产物说明见 **[Tree-sitter 使用方法](docs/TREE_SITTER.md)**。Tree-sitter 只提供语法结构，不产生 CFG、CPG、调用解析或数据流。
+输入 C/C++ 仓库，经过源码快照、Joern AST/CFG/CPG 或 Tree-sitter AST、证据包、局部 Schema 发现、独立合并与 AI 审查修正，再抽取实体、关系、属性和规则。最终交付 JSON/JSONL、报告和可回查源码的网页。支持 general 与 maintenance 两套提示词，中英文可混合保留。
 
-100 个 cpp、50 个 h、7 万行（5.6 万有效代码行）的模拟仓库生成、实测结果与大模型方案评估见 **[规模测试与抽取策略评估](docs/SCALE_TEST_150.md)**。测试使用真实 Tree-sitter 和本地模拟模型接口，不代表真实模型的语义准确率。
+常用参数集中在 `.env`，日常推荐 `scripts\intranet.bat`，合并、AI 审查与实例归并可以单独执行和恢复。合并先输出草稿和问题；每轮每批的 Schema 保存于 `schema/history/`，只读网页可选择版本对照。Tree-sitter 不依赖 Joern/Java，仅提供语法 AST；完整 CMake 求值、全仓数据流推理、RDF/OWL 和图数据库未实现。
 
-**内网交给 Agent 接手时：先读 [AGENTS.md](AGENTS.md)，再读 [内网 Agent 使用与接手手册](docs/INTRANET_AGENT_GUIDE.md)。手册末尾附有可直接复制的接手提示词。**
-
-支持通用 `general` 和设备运维 `maintenance` 两种提示词。Joern 三种视图共六组组合；Tree-sitter AST 共两组组合，报告按实际后端列出可用组合。
-
-六组逐项清单、CMD 批量检查命令、人工源码审核判据与指标口径见 **[六组基线与人工审核规程](docs/BASELINE_REVIEW.md)**；结果可填写 **[评审报告模板](docs/templates/BASELINE_REVIEW_REPORT.md)**。
-
-当前版本交付 JSON/JSONL、Markdown 与本地浏览界面；RDF、图数据库、完整 CMake 求值和数据流推理不在基线中。
-
-**分阶段工作台**：选择输入/输出目录，用按钮逐步扫描、Joern/Tree-sitter 抽取、准备模型输入、发现 Schema、抽取实例、校验和审核；可查看每步产物、日志与真实模型请求。使用项目自带虚拟环境，在 CMD 启动：
+**网页工作台**（执行阶段任务）：
 
 ```bat
-cd /d "D:\code\f47-work\code-ontology"
 call .venv\Scripts\activate.bat
 python -m code_ontology.workbench --port 8766
 ```
 
-浏览器打开 `http://127.0.0.1:8766`。操作步骤、输入输出、六组实验和恢复方法见 **[工作台使用说明](docs/WORKBENCH.md)**。不需要新增 Python 依赖或 npm 构建。
-
-新增独立的本地只读界面，支持本体 / 实例子图、断言分页、源码证据、实验对比、阶段追踪和人工评审；不改变现有抽取逻辑。图数据库和 RDF/OWL 推理仍未实现。
-
-使用 CMD 请看 **[CMD 完整运行步骤](docs/RUNNING_CMD.md)**，PowerShell/Linux 请看 **[完整运行步骤](docs/RUNNING.md)**；内网实验与判优方法见 **[实验评估手册](docs/EXPERIMENTS.md)**，每阶段输入输出见 **[数据流说明](docs/PIPELINE_IO.md)**。
-
-直接查看本机已有结果：
-
-```powershell
-.\.venv\Scripts\python.exe -m code_ontology.viewer --root outputs --port 8765
-# 浏览器打开 http://127.0.0.1:8765
-```
+浏览器打开 `http://127.0.0.1:8766`。只浏览已有结果使用 `python -m code_ontology.viewer --root outputs --port 8765`。详细配置、命令与结果位置见上方文档入口。
 
 ## 1. 环境和安装
 
@@ -190,7 +171,7 @@ schema 的类、父类、关系和属性是概念层；实体是代码定义、�
 
 模拟 API 不具备语义理解能力，其输出均为人为构造的测试数据。它不会使用 `.env` 中的模型地址；生成结果放在 `fixture-integration` 下并显式标记。真实抽取质量必须使用已配置模型另行运行 `smoke`/`baseline`。
 
-详见 `docs/ARCHITECTURE.md`、`docs/TROUBLESHOOTING.md` 和 `docs/VALIDATION.md`。
+详见 `docs/项目架构与产物.md`、`docs/维护与排障.md` 和 `docs/测试与评审.md`。
 
 ## 8. GitHub 与内网迁移
 

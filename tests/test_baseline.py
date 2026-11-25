@@ -27,7 +27,8 @@ class BaselineTests(unittest.TestCase):
         self.root = Path(self.temp.name)
         self.repo = self.root / "代码 仓"
         self.repo.mkdir()
-        self.policy = load_policy()
+        (self.root / ".env").write_text("", encoding="utf-8")
+        self.policy = load_policy(env_file=str(self.root / ".env"))
         self.policy["parser_backend"] = "joern"  # Synthetic three-view graph fixtures.
         self.policy["discovery_max_packs"] = 0
         (self.repo / "device.cpp").write_text("// 设备温度规则\nint monitor(int temperature) {\n  if (temperature > 85) return 1;\n  return 0;\n}\n", encoding="utf-8")
@@ -71,6 +72,37 @@ class BaselineTests(unittest.TestCase):
         (self.dest / "source" / "device.cpp").write_text("tampered")
         with self.assertRaises(ValueError):
             verify_sources(self.dest)
+
+    def test_atomic_write_retries_transient_permission_error(self):
+        target = self.root / "atomic.json"
+        real_replace = os.replace
+        attempts = 0
+
+        def flaky_replace(source, destination):
+            nonlocal attempts
+            attempts += 1
+            if attempts == 1:
+                raise PermissionError(13, "transient sharing violation")
+            return real_replace(source, destination)
+
+        with patch("code_ontology.util.os.replace", side_effect=flaky_replace):
+            write_json(target, {"ok": True})
+        self.assertEqual(read_json(target), {"ok": True})
+        self.assertEqual(attempts, 2)
+
+        completed = self.root / "completed-despite-error.json"
+        attempts = 0
+
+        def completed_replace(source, destination):
+            nonlocal attempts
+            attempts += 1
+            real_replace(source, destination)
+            raise PermissionError(13, "reported after completed move")
+
+        with patch("code_ontology.util.os.replace", side_effect=completed_replace):
+            write_json(completed, {"ok": True})
+        self.assertEqual(read_json(completed), {"ok": True})
+        self.assertEqual(attempts, 1)
 
     def test_encoding_and_output_inside_repo(self):
         (self.repo / "legacy.h").write_bytes("// 设备\nint legacy;".encode("gb18030"))

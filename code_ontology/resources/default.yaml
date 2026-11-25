@@ -21,3 +21,6 @@ discovery_max_packs: 24
 batch_packs: 2
 merge_max_rounds: 8
 prompt_dir: null
+review_batch_items: 32
+review_max_rounds: 2
+allow_unreviewed_schema: false

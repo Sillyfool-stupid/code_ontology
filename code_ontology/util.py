@@ -4,6 +4,7 @@ import hashlib
 import json
 import os
 import tempfile
+import time
 from datetime import datetime, timezone, timedelta
 from pathlib import Path
 from typing import Iterable, Any
@@ -29,6 +30,34 @@ def file_hash(path: Path) -> str:
     return h.hexdigest()
 
 
+def native_path(path: str | Path) -> str:
+    value = os.path.abspath(os.fspath(path))
+    if os.name != "nt" or value.startswith("\\\\?\\"):
+        return value
+    if value.startswith("\\\\"):
+        return "\\\\?\\UNC\\" + value[2:]
+    return "\\\\?\\" + value
+
+
+def atomic_replace(source: str | Path, target: str | Path) -> None:
+    """Replace a file atomically, tolerating brief Windows sharing violations."""
+    source_path = native_path(source)
+    target_path = native_path(target)
+    for attempt in range(6):
+        try:
+            os.replace(source_path, target_path)
+            return
+        except PermissionError:
+            # On Windows the move can complete before a sharing violation is
+            # reported. In that case retrying the vanished temp file would
+            # turn a successful write into FileNotFoundError.
+            if not os.path.exists(source_path) and os.path.exists(target_path):
+                return
+            if attempt == 5:
+                raise
+            time.sleep(0.01 * (2 ** attempt))
+
+
 def read_json(path: Path) -> Any:
     return json.loads(path.read_text(encoding="utf-8"))
 
@@ -40,7 +69,7 @@ def write_text(path: Path, text: str) -> None:
     try:
         with os.fdopen(fd, "w", encoding="utf-8", newline="\n") as f:
             f.write(text)
-        os.replace(name, path)
+        atomic_replace(name, path)
     finally:
         if os.path.exists(name):
             os.unlink(name)
@@ -67,7 +96,7 @@ def write_jsonl(path: Path, rows: Iterable[Any]) -> None:
         with os.fdopen(fd, "w", encoding="utf-8", newline="\n") as f:
             for row in rows:
                 f.write(canonical(row) + "\n")
-        os.replace(name, path)
+        atomic_replace(name, path)
     finally:
         if os.path.exists(name):
             os.unlink(name)

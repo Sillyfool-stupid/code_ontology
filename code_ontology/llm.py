@@ -91,6 +91,8 @@ class LLM:
             for attempt in range(self.settings.retries + 2):
                 params = {"model": self.settings.model, "messages": messages, "max_tokens": self.settings.max_output_tokens,
                           "temperature": self.settings.temperature}
+                if not self.settings.send_max_tokens:
+                    params.pop("max_tokens")
                 if self.settings.thinking != "auto":
                     params["extra_body"] = {"thinking": {"type": self.settings.thinking}}
                     if self.settings.thinking == "enabled":

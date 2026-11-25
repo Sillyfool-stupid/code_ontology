@@ -6,7 +6,7 @@ const pretty = value => JSON.stringify(value, null, 2);
 const labels = {entities:"实体",relations:"实体关系",attributes:"属性断言",rules:"代码规则",candidates:"候选项",conflicts:"属性冲突"};
 const schemaLabels = {classes:"概念",relations:"关系类型",properties:"属性类型"};
 const pageTitles = {graph:["从代码中看见业务结构","探索概念与关系，沿证据回到源码。"],records:["每一条知识，都有出处","逐项查看实例、属性与规则，保留候选和冲突供复核。"],compare:["比较实验，而非比较数量","并列查看同一源码快照下不同视图与提示词的结果。"],stages:["沿着产物追踪每个阶段","从源码快照到最终本体，查看阶段边界与处理范围。"],review:["让质量判断有据可查","查看人工评审记录，导出标签用于离线汇总。"]};
-const S = {runs:[],run:null,detail:null,page:"graph",layer:"schema",kind:"entities",offset:0,query:"",epoch:0,detailEpoch:0,review:{}};
+const S = {runs:[],run:null,detail:null,page:"graph",layer:new URLSearchParams(location.search).get("layer")==="instances"?"instances":"schema",kind:"entities",offset:0,query:"",epoch:0,detailEpoch:0,review:{}};
 try { S.review = JSON.parse(localStorage.getItem("code-atlas-reviews-v1") || "{}"); } catch (_) { S.review = {}; }
 function toast(text){ const node=$("#toast");node.textContent=text;node.hidden=false;clearTimeout(toast.timer);toast.timer=setTimeout(()=>node.hidden=true,5000); }
 async function api(name,args={}) { const r=await fetch(`/api/${name}?${new URLSearchParams(args)}`);const d=await r.json();if(!r.ok)throw Error(d.error || `HTTP ${r.status}`);return d; }
@@ -24,13 +24,14 @@ async function refresh(){
 }
 async function selectRun(id){
   const d=await api("run",{id});if($("#run-select").value!==id)return;
-  S.detail=d;S.run=d.run;S.offset=0;S.detailEpoch++;
+  S.detail=d;S.run=d.run;S.snapshot=null;S.offset=0;S.detailEpoch++;
   const m=d.run.metrics;$("#model-label").textContent=`${d.run.model} · ${d.source.file_count} 个源码文件`;
   const status=$("#run-status");status.textContent=d.run.fixture?"模拟接口 · 不能评估质量":`${d.run.view.toUpperCase()} / ${d.run.profile} · ${d.run.status}`;
   status.className="tag"+(d.run.fixture||d.run.status!=="success"?" warn":"");
   const notices=[];
   if(d.run.fixture)notices.push("当前是模拟模型接口结果，仅用于验证流程。请切换到真实模型实验评估业务抽取质量。");
   if(d.run.status!=="success")notices.push("本次运行尚未完整成功；已有文件可能来自部分阶段或更早的尝试，请查看阶段状态。");
+  if(d.schema_review?.state)notices.push(`AI 审查：${d.schema_review.state}；实例 Schema 来源：${d.schema_scope?.review_state||"尚未记录"}。`);
   notices.push(`发现阶段选择 ${d.discovery.selected} / ${d.discovery.total ?? "?"} 个证据包；实例阶段准备 ${d.prepared.packs ?? "?"} 个包。数量与证据可定位率不代表语义正确率。`);
   $("#notice").textContent=notices.join(" ");$("#notice").hidden=false;
   $("#metrics").innerHTML=metric("业务概念",d.schema.classes.length,"固定 schema 中的类")+metric("关系类型",d.schema.relations.length,"概念间的关联定义")+metric("抽取实体",m.entities,"含代码 / 配置 / 示例范围")+metric("代码规则",m.rules,"条件与动作，待人工核验")+metric("候选 / 冲突",`${m.candidates ?? "—"} / ${m.conflicts ?? "—"}`,"保留歧义供后续复核")+metric("证据可定位率",m.evidence_locatable_rate==null?"—":`${Math.round(m.evidence_locatable_rate*100)}%`,"只表示引用可回查");
@@ -47,11 +48,12 @@ async function render(){
   if(S.page==="review")reviewPage();
 }
 function detailPanel(){return '<aside class="panel"><div class="panel-head"><div><h2>条目与源码证据</h2><small>点击图中节点、关系或表格行</small></div></div><div id="detail-body" class="detail-placeholder"><div class="detail-icon">⌁</div>选择一个条目<br>查看定义、引用与源码位置</div></aside>';}
-function schemaRecord(kind,row){return {record_id:S.detail.schema_record_ids[kind][row.id],payload:row,kind:"schema."+kind};}
+function shownSchema(){return S.snapshot||S.detail;}
+function schemaRecord(kind,row){const context=shownSchema();return {record_id:context.schema_record_ids[kind][row.id],payload:row,kind:"schema."+kind,schema:context.schema};}
 function reviewKey(record){return `${S.run.id}/${record.record_id}`;}
 function showDetail(record){
   S.detailEpoch++;const target=$("#detail-body");if(!target)return;target.className="detail-body";
-  const row=record.payload;const kind=record.kind;const schema=S.detail.schema;const names=Object.fromEntries([...schema.classes,...schema.relations,...schema.properties].map(r=>[r.id,r.name]));
+  const row=record.payload;const kind=record.kind;const schema=record.schema||S.detail.schema;const names=Object.fromEntries([...schema.classes,...schema.relations,...schema.properties].map(r=>[r.id,r.name]));
   const name=row.name||names[row.property_id]||names[row.relation_id]||row.reason||"条目详情";
   target.innerHTML=`<div class="detail-name">${esc(name)}</div><div class="detail-meta">${esc(kind)}${row.scope?" · "+esc(row.scope):""}${row.basis?" · "+esc(row.basis):""}</div>${row.definition?`<p class="subsection">${esc(row.definition)}</p>`:""}${row.aliases?`<div class="subsection">${row.aliases.map(a=>`<span class="pill">${esc(a)}</span>`).join("")}</div>`:""}<div id="related-schema"></div><h3>完整条目</h3><pre class="json">${esc(pretty(row))}</pre><h3>源码证据</h3><div id="evidence-buttons"></div><div id="evidence-source"></div><h3>人工判断</h3><div id="review-form"></div>`;
   if(kind==="schema.classes"){
@@ -82,8 +84,18 @@ function reviewForm(record){
   },"button primary"));
 }
 async function graphPage(epoch){
+  document.title=`${S.layer==="schema"?"Schema":"Instances"} · ${S.run.experiment} · Code Atlas`;
   $("#page-content").innerHTML=`<div class="graph-grid"><section class="panel"><div class="panel-head"><div><h2>${S.layer==="schema"?"本体结构 · Schema":"实例关系 · Instances"}</h2><small>结构视图与实例视图分别展示，点击条目追溯证据</small></div><button class="button" id="export-svg">导出 SVG</button></div><div class="toolbar"><button class="button ${S.layer==="schema"?'selected':''}" id="schema-layer">本体结构</button><button class="button ${S.layer==="instances"?'selected':''}" id="instance-layer">抽取实例</button><input id="graph-search" aria-label="搜索图谱" placeholder="搜索名称或定义"><button class="button" id="graph-find">筛选</button><button class="button" id="graph-reset">复位</button></div><div class="graph-wrap" id="graph-host"></div><div class="legend"><span><i></i>${S.layer==="schema"?"业务概念":"实体"}</span><span><i class="blue"></i>${S.layer==="schema"?"层级 / 业务关系":"实例关系"}</span><span>滚轮缩放 · 拖动平移</span></div><div class="graph-note" id="graph-note"></div></section>${detailPanel()}</div>`;
   $("#schema-layer").onclick=()=>{S.layer="schema";render().catch(failure);};$("#instance-layer").onclick=()=>{S.layer="instances";render().catch(failure);};
+  if(S.layer==="schema"){
+    const bar=document.createElement("div");bar.className="toolbar";
+    const label=document.createElement("label");label.textContent="Schema 版本";label.htmlFor="schema-version";
+    const select=document.createElement("select");select.id="schema-version";select.setAttribute("aria-label","选择 Schema 历史版本");select.style.maxWidth="85%";
+    const current=document.createElement("option");current.value="";current.textContent="当前结果（实例抽取使用的 Schema）";select.append(current);
+    for(const row of S.detail.schema_history||[]){const option=document.createElement("option");option.value=row.path;option.textContent=`${row.stage==="merge"?"合并":"审查"} · ${row.created_at.slice(0,19)} · ${row.location} · ${row.path.split("/").pop()}${row.state!=="accepted"?" · 未校验候选":""}`;select.append(option);}
+    select.value=S.snapshot?.path||"";select.onchange=async()=>{try{const id=S.run.id,value=select.value;const data=value?await api("schema-snapshot",{id,path:value}):null;if(id!==S.run.id||select.value!==value)return;S.snapshot=data;await render();}catch(e){failure(e);}};
+    bar.append(label,select);$("#graph-host").before(bar);
+  }
   let entities=[],relations=[],instanceTotal=0,relationTotal=0;
   if(S.layer==="instances"){
     const [a,b]=await Promise.all([api("records",{id:S.run.id,kind:"entities",limit:1000}),api("records",{id:S.run.id,kind:"relations",limit:1000})]);
@@ -92,7 +104,7 @@ async function graphPage(epoch){
   function draw(){
     const query=$("#graph-search").value.toLocaleLowerCase();let nodes=[],edges=[],total=0;
     if(S.layer==="schema"){
-      const schema=S.detail.schema;total=schema.classes.length;
+      const schema=shownSchema().schema;total=schema.classes.length;
       nodes=schema.classes.filter(c=>!query||`${c.name} ${c.aliases.join(" ")} ${c.definition}`.toLocaleLowerCase().includes(query)).slice(0,80).map(c=>({id:c.id,label:c.name,sub:`${schema.properties.filter(p=>p.domain.includes(c.id)).length} 个属性`,record:schemaRecord("classes",c)}));
       for(const c of schema.classes)for(const p of c.parents)edges.push({from:c.id,to:p,label:"子类 → 父类",inheritance:true,record:schemaRecord("classes",c)});
       for(const r of schema.relations)for(const d of r.domain)for(const t of r.range)if(edges.length<600)edges.push({from:d,to:t,label:r.name,record:schemaRecord("relations",r)});
@@ -154,13 +166,13 @@ function comparePage(){
 }
 function stagesPage(){
   const view=S.run.view;const base=`runs/${S.run.experiment}/${view}/${S.run.profile}`;
-  const rows=[['源码快照','仓库文件 + include/exclude + 解析参数','manifest.json；source/','manifest','固定内容与编码，检查纳入范围与排除原因。'],['Joern 与图规范化','固定源码 + 编译信息','raw/cpg.bin；normalized/'+view+'/','normalized','一次解析后生成 AST / CFG / 综合 CPG，检查节点与边引用。'],['证据包准备','规范图 + 源码 + 分块预算','prepared/'+view+'/packs.jsonl','prepared','按函数 / 类型组织模型输入，记录上下文裁剪与跳过的符号。'],['局部 schema 发现','显式选择的证据包 + 领域提示词',base+'/schema/local/','selection','未选中的包不代表没有业务概念，采样覆盖必须明确。'],['Schema 合并与固定','局部候选 + 支持证据',base+'/schema/schema.json','provenance','检查同义归并、层级与关系端点；改提示词后显式更新 schema。'],['实例与规则抽取','固定 schema + 单批证据包',base+'/extraction/','extraction_selection','逐任务抽取实体、关系、属性与条件动作，记录省略的 schema 项。'],['校验与最终产物','Schema + 抽取批次 + 源码证据',base+'/final/','metrics','正式断言、候选、冲突分别落盘；数量不代表质量。'],['证据位置校验','源码快照 + 正式输出',base+'/validation.json','validation','需要独立执行 validate；验证引用和位置，不验证业务语义。'],['概念别名评估','人工概念参考答案 + schema',base+'/evaluation.json','evaluation','需要独立执行 evaluate；仅为概念召回导航。']];
+  const rows=[['源码快照','仓库文件 + include/exclude + 解析参数','manifest.json；source/','manifest','固定内容与编码，检查纳入范围与排除原因。'],['Joern 与图规范化','固定源码 + 编译信息','raw/cpg.bin；normalized/'+view+'/','normalized','一次解析后生成 AST / CFG / 综合 CPG，检查节点与边引用。'],['证据包准备','规范图 + 源码 + 分块预算','prepared/'+view+'/packs.jsonl','prepared','按函数 / 类型组织模型输入，记录上下文裁剪与跳过的符号。'],['局部 schema 发现','显式选择的证据包 + 领域提示词',base+'/schema/local/','selection','未选中的包不代表没有业务概念，采样覆盖必须明确。'],['Schema 合并草稿','局部候选 + 支持证据',base+'/schema/draft-schema.json；schema/history/','provenance','先保存合法草稿、来源映射与每轮历史；语义差异交给独立审查。'],['AI 审查并修正 Schema','合并草稿 + 来源映射 + 源码证据',base+'/schema/review-report.json；schema/schema.json','schema_review','分批审查和定向修正，保留意见与各轮候选；AI 审查不等于人工确认。'],['实例与规则抽取','固定 schema + 单批证据包',base+'/extraction/','extraction_selection','逐任务抽取实体、关系、属性与条件动作，记录省略的 schema 项。'],['校验与最终产物','Schema + 抽取批次 + 源码证据',base+'/final/','metrics','正式断言、候选、冲突分别落盘；数量不代表质量。'],['证据位置校验','源码快照 + 正式输出',base+'/validation.json','validation','需要独立执行 validate；验证引用和位置，不验证业务语义。'],['概念别名评估','人工概念参考答案 + schema',base+'/evaluation.json','evaluation','需要独立执行 evaluate；仅为概念召回导航。']];
   $("#page-content").innerHTML=`<div class="graph-grid"><section class="panel"><div class="panel-head"><div><h2>阶段输入与输出</h2><small>只读取已存在的文件，未执行阶段显示为空</small></div></div><div class="stage-list">${rows.map((r,i)=>`<article class="stage"><div class="stage-number">${String(i+1).padStart(2,"0")}</div><div><strong>${r[0]}</strong><p>输入：${esc(r[1])}</p><code>输出：${esc(r[2])}</code><p>${esc(r[4])}</p></div><button class="button" data-artifact="${r[3]}">查看产物</button></article>`).join("")}</div></section><aside class="panel"><div class="panel-head"><h2>产物摘要</h2></div><div class="panel-body" id="artifact-detail"><p>从左侧选择一个阶段。</p><h3>运行状态</h3><pre class="json">${esc(pretty(S.detail.stages))}</pre></div></aside></div>`;
   $$('[data-artifact]').forEach(b=>b.onclick=async()=>{try{const id=S.run.id;const d=await api("artifact",{id,name:b.dataset.artifact});if(id!==S.run.id)return;$("#artifact-detail").innerHTML=`<div class="source-file">${esc(d.path)}</div><pre class="json">${esc(pretty(d.data))}</pre>${d.data===null?'<p>尚未生成此产物，请按运行文档执行对应命令。</p>':''}`;}catch(e){failure(e);}});
 }
 function reviewPage(){
   const records=Object.values(S.review).filter(r=>r.run_id===S.run.id);const count=key=>records.filter(r=>r.verdict===key).length;
-  $("#page-content").innerHTML=`<section class="panel"><div class="panel-head"><div><h2>当前实验 · 人工评审</h2><small>浏览器本地保存，导出文件后可使用 review summarize 汇总</small></div><button class="button primary" id="export-review">导出评审 JSON</button></div><div class="panel-body"><div class="review-note">已记录 ${records.length} 条：正确 ${count("correct")} · 部分正确 ${count("partial")} · 错误 ${count("incorrect")} · 无法判定 ${count("uncertain")}。<br>交互选择属于非随机样本，不能直接推断整个仓库的精确率。正式实验建议用 review sample 生成分层抽样 CSV；详见 docs/EXPERIMENTS.md。</div><div class="table-wrap"><table><thead><tr><th>集合</th><th>条目</th><th>整体判断</th><th>源码支持</th><th>备注</th></tr></thead><tbody>${records.map((r,i)=>`<tr class="record-row" data-review-row="${i}"><td>${esc(r.kind)}</td><td>${esc(r.payload.name||r.payload.reason||r.record_id)}</td><td>${esc(r.verdict||"待评审")}</td><td>${esc(r.evidence_support||"待评审")}</td><td>${esc(r.notes)}</td></tr>`).join("")}</tbody></table>${records.length?'':'<div class="empty">在图谱或知识断言页选择条目，填写并保存人工判断。</div>'}</div></div></section><div id="review-inspect" class="subsection"></div>`;
+  $("#page-content").innerHTML=`<section class="panel"><div class="panel-head"><div><h2>当前实验 · 人工评审</h2><small>浏览器本地保存，导出文件后可使用 review summarize 汇总</small></div><button class="button primary" id="export-review">导出评审 JSON</button></div><div class="panel-body"><div class="review-note">已记录 ${records.length} 条：正确 ${count("correct")} · 部分正确 ${count("partial")} · 错误 ${count("incorrect")} · 无法判定 ${count("uncertain")}。<br>交互选择属于非随机样本，不能直接推断整个仓库的精确率。正式实验建议用 review sample 生成分层抽样 CSV；详见 docs/测试与评审.md。</div><div class="table-wrap"><table><thead><tr><th>集合</th><th>条目</th><th>整体判断</th><th>源码支持</th><th>备注</th></tr></thead><tbody>${records.map((r,i)=>`<tr class="record-row" data-review-row="${i}"><td>${esc(r.kind)}</td><td>${esc(r.payload.name||r.payload.reason||r.record_id)}</td><td>${esc(r.verdict||"待评审")}</td><td>${esc(r.evidence_support||"待评审")}</td><td>${esc(r.notes)}</td></tr>`).join("")}</tbody></table>${records.length?'':'<div class="empty">在图谱或知识断言页选择条目，填写并保存人工判断。</div>'}</div></div></section><div id="review-inspect" class="subsection"></div>`;
   $("#export-review").onclick=()=>download(`reviews-${S.run.experiment}-${S.run.view}-${S.run.profile}.json`,pretty({format_version:1,sampling_method:"interactive_nonrandom",run_id:S.run.id,run_path:S.run.path,snapshot:S.run.snapshot,exported_at:new Date().toISOString(),annotations:records}));
   $$('[data-review-row]').forEach(b=>b.onclick=()=>{$("#review-inspect").innerHTML=detailPanel();showDetail(records[Number(b.dataset.reviewRow)]);});
 }

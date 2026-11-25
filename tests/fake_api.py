@@ -10,16 +10,23 @@ import time
 
 def fixture_response(payload):
     stage = payload.get("stage")
+    if stage == "review":
+        return {"ontology": payload["current_schema"], "source_mapping": [s["current_mapping"] for s in payload["source_items"]], "issues": []}
     if stage == "merge":
         candidates = payload["candidates"]
         evidence = sorted({e for c in candidates for category in ("classes", "relations", "properties") for row in c[category] for e in row["evidence_ids"]})
     else:
         evidence = sorted({e for p in payload.get("packs", []) for e in p["evidence_ids"]})
     if stage in {"discover", "merge"}:
-        return {"version": "0.1", "profile": payload.get("profile", ""),
+        schema = {"version": "0.1", "profile": payload.get("profile", ""),
                 "classes": [{"id": "device", "name": "设备", "definition": "测试替身生成的概念，不是实际模型发现结果",
                              "aliases": ["Device"], "parents": [], "evidence_ids": evidence}],
                 "relations": [], "properties": [], "unresolved": ["This response is a synthetic fixture"]}
+        if stage == "merge":
+            return {"ontology": schema, "source_mapping": [
+                {"source_id": row["id"], "target_id": "device", "action": "merge", "reason": "Synthetic fixture equivalent"}
+                for candidate in payload["candidates"] for row in candidate["classes"]]}
+        return schema
     if stage == "extract":
         classes = payload["schema"]["classes"]
         return {"entities": ([{"id": "e1", "name": "测试定义", "type_id": classes[0]["id"],
@@ -57,7 +64,10 @@ def fake_server(mode="normal"):
                 return
             if stage == "merge" and state.get("merge_delay"):
                 time.sleep(state["merge_delay"])
-            value = fixture_response(payload)
+            if stage == "review" and state.get("fail_review_on") == state["stage_counts"][stage]:
+                self.respond(504, {"error": {"message": "fixture review timeout", "type": "timeout"}})
+                return
+            value = state.get("response_factory", fixture_response)(payload)
             content = json.dumps(value, ensure_ascii=False)
             if mode == "invalid_once" and state["requests"] == 1:
                 content = "not JSON"

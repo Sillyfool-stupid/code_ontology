@@ -96,7 +96,41 @@ class ArtifactStore:
                 "validation": self.load(output / "validation.json"),
                 "evaluation": self.load(output / "evaluation.json"),
                 "provenance": self.load(output / "schema" / "provenance.json"),
+                "schema_review": self.load(output / "schema/review-status.json", {}),
+                "schema_scope": self.load(output / "schema-scope.json", {}),
+                "schema_history": self.schema_history(rid),
                 "graphs": {v: self.load(snap / "normalized" / v / "index.json") for v in ("ast", "cfg", "cpg")}}
+
+    def schema_history(self, rid):
+        output, _, _ = self.locate(rid)
+        history = self.safe(output / "schema/history")
+        rows = []
+        for path in sorted(history.glob("*/manifest.json"), reverse=True):
+            try:
+                manifest = self.load(path, {})
+                for entry in manifest.get("snapshots", []):
+                    for relative in entry.get("schemas", []):
+                        schema_path = path.parent / relative
+                        if not within(schema_path, history) or not schema_path.is_file():
+                            continue
+                        rows.append({"path": schema_path.relative_to(history).as_posix(),
+                                     "attempt": path.parent.name, "stage": manifest["stage"],
+                                     "attempt_state": manifest["state"], "state": entry["state"],
+                                     "location": entry["location"], "created_at": entry["created_at"]})
+            except (ValueError, OSError, KeyError):
+                continue
+        return rows
+
+    def schema_snapshot(self, rid, relative):
+        from .models import Ontology
+        output, _, _ = self.locate(rid)
+        if relative not in {row["path"] for row in self.schema_history(rid)}:
+            raise KeyError("Unknown schema history snapshot")
+        path = output / "schema/history" / relative
+        schema = Ontology.model_validate(self.load(path)).model_dump()
+        return {"schema": schema, "path": relative,
+                "schema_record_ids": {kind: {row["id"]: record_id("schema." + kind, row)
+                                     for row in schema[kind]} for kind in ("classes", "relations", "properties")}}
 
     def records(self, rid, kind, offset=0, limit=50, query=""):
         if kind not in KINDS:
@@ -143,6 +177,7 @@ class ArtifactStore:
         allowed = {"manifest": snap / "manifest.json", "normalized": snap / "normalized" / item["view"] / "index.json",
                    "prepared": snap / "prepared" / item["view"] / "index.json",
                    "selection": output / "schema" / "selection.json", "provenance": output / "schema" / "provenance.json",
+                   "schema_review": output / "schema/review-report.json", "schema_scope": output / "schema-scope.json",
                    "extraction_selection": output / "extraction" / "selection.json",
                    "metrics": output / "metrics.json", "validation": output / "validation.json", "evaluation": output / "evaluation.json"}
         if name not in allowed:
@@ -166,6 +201,8 @@ def make_server(root: Path, port=8765):
                         data = store.detail(rid)
                     elif url.path == "/api/records":
                         data = store.records(rid, args.get("kind", "entities"), int(args.get("offset", 0)), int(args.get("limit", 50)), args.get("q", ""))
+                    elif url.path == "/api/schema-snapshot":
+                        data = store.schema_snapshot(rid, args.get("path", ""))
                     elif url.path == "/api/evidence":
                         data = store.evidence(rid, args.get("evidence_id", ""))
                     elif url.path == "/api/artifact":

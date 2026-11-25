@@ -23,7 +23,7 @@ def parser():
     root = argparse.ArgumentParser(description="Joern / Tree-sitter + LLM 代码业务本体抽取")
     sub = root.add_subparsers(dest="command", required=True)
     commands = {}
-    for name in ("scan", "parse", "prepare", "discover", "extract", "run", "experiment", "doctor", "report", "validate", "evaluate", "import-graph", "normalize", "discover-local", "merge-schema", "finalize"):
+    for name in ("scan", "parse", "prepare", "discover", "extract", "run", "experiment", "doctor", "report", "validate", "evaluate", "import-graph", "normalize", "discover-local", "merge-schema", "review-schema", "finalize"):
         p = sub.add_parser(name)
         p.add_argument("--env-file")
         p.add_argument("--config", help="YAML policy; unknown keys are rejected")
@@ -39,11 +39,11 @@ def parser():
     for name in ("parse", "run", "experiment"):
         commands[name].add_argument("--views", help="Comma-separated ast,cfg,cpg")
         commands[name].add_argument("--force-parse", action="store_true")
-    for name in ("prepare", "discover", "extract", "validate", "import-graph", "normalize", "discover-local", "merge-schema", "finalize"):
+    for name in ("prepare", "discover", "extract", "validate", "import-graph", "normalize", "discover-local", "merge-schema", "review-schema", "finalize"):
         commands[name].add_argument("--snapshot", type=Path, required=True)
-    for name in ("prepare", "discover", "extract", "validate", "normalize", "discover-local", "merge-schema", "finalize"):
+    for name in ("prepare", "discover", "extract", "validate", "normalize", "discover-local", "merge-schema", "review-schema", "finalize"):
         commands[name].add_argument("--view", choices=["ast", "cfg", "cpg"], default="cpg")
-    for name in ("discover", "extract", "run", "experiment", "discover-local", "merge-schema", "finalize"):
+    for name in ("discover", "extract", "run", "experiment", "discover-local", "merge-schema", "review-schema", "finalize"):
         p = commands[name]
         p.add_argument("--profile", choices=["general", "maintenance", "both"])
         p.add_argument("--experiment", default="baseline", help="Use a new ID for independent repeated experiments")
@@ -52,6 +52,8 @@ def parser():
             p.add_argument("--schema", type=Path)
     commands["parse"].add_argument("--raw-only", action="store_true")
     commands["extract"].add_argument("--defer-finalize", action="store_true")
+    commands["extract"].add_argument("--require-schema-review", action="store_true",
+                                    help="Validate review provenance even when using a frozen --schema copy (workbench)")
     commands["doctor"].add_argument("--no-llm", action="store_true")
     commands["doctor"].add_argument("--out", type=Path, default=PROJECT / "outputs" / "doctor")
     commands["report"].add_argument("--snapshot", type=Path)
@@ -247,10 +249,10 @@ def main(argv=None):
                 return 0
         if command == "prepare":
             print(prepare(dest, args.view, policy)); return 0
-        if command in {"discover", "extract", "discover-local", "merge-schema", "finalize"}:
+        if command in {"discover", "extract", "discover-local", "merge-schema", "review-schema", "finalize"}:
             views = [args.view]
         for view in views:
-            if command not in {"extract", "discover-local", "merge-schema", "finalize"}:
+            if command not in {"extract", "discover-local", "merge-schema", "review-schema", "finalize"}:
                 prepare(dest, view, policy)
             elif not (dest / "prepared" / view / "packs.jsonl").is_file():
                 raise ValueError("Run prepare first")
@@ -268,34 +270,40 @@ def main(argv=None):
                     pipeline.discover_local()
                 elif command == "merge-schema":
                     pipeline.merge_schema()
+                elif command == "review-schema":
+                    pipeline.review_schema()
                 elif command == "finalize":
                     pipeline.finalize_saved()
                 else:
                     supplied = getattr(args, "schema", None)
+                    explicit_schema = bool(supplied) and not getattr(args, "require_schema_review", False)
                     if command == "extract":
                         supplied = supplied or pipeline.output / "schema" / "schema.json"
                         merge_status = pipeline.output / "schema" / "merge-status.json"
-                        if merge_status.is_file() and read_json(merge_status)["state"] != "success":
+                        if not explicit_schema and merge_status.is_file() and read_json(merge_status)["state"] != "success":
                             raise ValueError("Schema merge incomplete; run merge-schema first")
-                        if merge_status.is_file() and (pipeline.output / "schema/local-manifest.json").is_file():
-                            from .stages import SchemaStages
-                            checker = SchemaStages(pipeline, "merge")
-                            try:
-                                checker.verify_merged()
-                            finally:
-                                checker.close()
+                        if getattr(args, "require_schema_review", False):
+                            current = pipeline.output / "schema" / "schema.json"
+                            if not current.is_file() or read_json(supplied) != read_json(current):
+                                raise ValueError("Frozen schema differs from current schema; refresh the workbench task before extracting")
                     schema = pipeline.fixed_schema(supplied, args.update_schema)
                     if command != "discover":
+                        if not explicit_schema and (pipeline.output / "schema/local-manifest.json").is_file():
+                            from .schema_review import check_schema_use
+                            review_state = check_schema_use(pipeline)
+                            write_json(pipeline.output / "schema-scope.json", {"source": "merged", "review_state": review_state})
+                        elif explicit_schema:
+                            write_json(pipeline.output / "schema-scope.json", {"source": str(supplied), "review_state": "explicit_schema_selection"})
                         if not pipeline.extract(schema, not getattr(args, "defer_finalize", False)):
                             errors.append(f"{view}/{profile}: partial")
-                if command in {"discover", "discover-local", "merge-schema"}:
+                if command in {"discover", "discover-local", "merge-schema", "review-schema"}:
                     pipeline.save_state("execution", "partial" if pipeline.errors else "success")
                 (pipeline.output / "execution.failed.json").unlink(missing_ok=True)
                 print(f"OUTPUT={pipeline.output}", flush=True)
             except Exception as e:
                 safe_error = str(e).replace(settings.api_key, "<redacted>") if settings.api_key else str(e)
                 if pipeline:
-                    pipeline.save_state("execution", "partial" if command in {"discover-local", "merge-schema"} else "failed", error=safe_error)
+                    pipeline.save_state("execution", "partial" if command in {"discover-local", "merge-schema", "review-schema"} else "failed", error=safe_error)
                 failure = {"view": view, "profile": profile, "state": "failed",
                            "error": safe_error, "updated_at": now()}
                 write_json(dest / "runs" / args.experiment / view / profile / "execution.failed.json", failure)
@@ -304,7 +312,7 @@ def main(argv=None):
             finally:
                 if pipeline:
                     pipeline.close()
-        if command not in {"discover", "discover-local", "merge-schema"} and not getattr(args, "defer_finalize", False):
+        if command not in {"discover", "discover-local", "merge-schema", "review-schema"} and not getattr(args, "defer_finalize", False):
             print(comparison(dest, args.experiment))
         if errors:
             write_json(dest / "runs" / args.experiment / "errors.json", errors)

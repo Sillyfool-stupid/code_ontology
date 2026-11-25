@@ -2,18 +2,18 @@
 
 本子目录是独立的 Python / Joern / LLM 工具，不是上级目录的课程 Notebook/Word 报告作业。用户的具体任务与约束优先。
 
-开始工作先阅读 [内网 Agent 使用与接手手册](docs/INTRANET_AGENT_GUIDE.md)，按当前任务选择对应章节。人工操作的简版命令在 [CMD 运行说明](docs/RUNNING_CMD.md)。
+开始工作先阅读 [内网 Agent 使用与接手手册](docs/维护与排障.md)，按当前任务选择对应章节。人工操作的简版命令在 [CMD 运行说明](docs/使用指南.md)。
 
-分阶段网页工作台见 [WORKBENCH.md](docs/WORKBENCH.md)：激活本项目 `.venv` 后运行 `python -m code_ontology.workbench --port 8766`。工作台有真实任务与模型按钮；不要为了检查页面而触发真实模型。内置 Tree-sitter C/C++ AST 解析见 [TREE_SITTER.md](docs/TREE_SITTER.md)，用 `configs/tree-sitter.yaml`；仅 AST，两组 profile，无 CFG/CPG。任意外部 tree-sitter JSON 仍需适配。普通 CLI 与工作台不要并发写同一实验。
+分阶段网页工作台见 [网页操作.md](docs/网页操作.md)：激活本项目 `.venv` 后运行 `python -m code_ontology.workbench --port 8766`。工作台有真实任务与模型按钮；不要为了检查页面而触发真实模型。内置 Tree-sitter C/C++ AST 解析见 [使用指南.md](docs/使用指南.md)，用 `configs/tree-sitter.yaml`；仅 AST，两组 profile，无 CFG/CPG。任意外部 tree-sitter JSON 仍需适配。普通 CLI 与工作台不要并发写同一实验。
 
-执行六组基线与组织人工审核时，按 [六组基线与人工审核规程](docs/BASELINE_REVIEW.md) 固定输入、运行矩阵、采样与评分口径；交付使用 [评审报告模板](docs/templates/BASELINE_REVIEW_REPORT.md)。人工标签不能由 Agent 自评代填。
+执行六组基线与组织人工审核时，按 [六组基线与人工审核规程](docs/测试与评审.md) 固定输入、运行矩阵、采样与评分口径；交付使用 [评审报告模板](docs/测试与评审.md)。人工标签不能由 Agent 自评代填。
 
 ## 接手原则
 
 - 从实际工作目录识别项目根路径，不把外网机器的 `D:\code\f47-work\code-ontology` 当成内网路径。
 - Windows 用户偏好：先激活 `.venv`，之后使用 `python`；无需 `-X utf8`。识别 CMD、PowerShell、Linux shell，不能混用变量和激活语法。
 - Agent 的不同工具调用可能不共享 shell 环境；每个需要运行 Python 的新 shell 先激活环境。不要仅凭 `(.venv)` 字样判断解释器，检查 `sys.executable`。
-- 常用模型与策略统一读取 `.env`（CO_*、LLM_*）；YAML 保留可选兼容。优先级 CLI > 系统环境 > .env > YAML > 默认；提示词保留在 `code_ontology/resources/prompts/`。详见 [内网逐步脚本](docs/INTRANET_STEPS.md)。
+- 常用模型与策略统一读取 `.env`（CO_*、LLM_*）；YAML 保留可选兼容。优先级 CLI > 系统环境 > .env > YAML > 默认；提示词保留在 `code_ontology/resources/prompts/`。详见 [内网逐步脚本](docs/使用指南.md)。
 - 密钥不写入回答、文档、测试样例或提交；不要把整个 `.env` 打印到日志。使用用户指定的内网模型，不自动切换外网端点。
 - 输入仓库与已生成的 `source/` 快照保持原样；调整范围、配置或程序后由正常入口生成产物。不要手改正式结果来伪造通过。
 - 现有抽取流程与只读界面分离。用户仅要求展示、说明或排障时，不顺带改 schema/实例抽取逻辑。
@@ -53,7 +53,7 @@
 
 ## 内网逐步运行需求与实现记录（2026-11-24）
 
-以下保留用户原始需求。当前已提供 `.env` 集中配置、内网启动脚本、独立 discover-local/merge-schema/finalize、阶段参数、检查点恢复、截断拆分、unknown 超时状态及北京时间。具体已实现接口和边界以 [INTRANET_STEPS.md](docs/INTRANET_STEPS.md) 为准；下文历史设计示例不全部代表实际命令。无相关任务时不要求 Agent 自动扩展功能。
+以下保留用户原始需求。当前已提供 `.env` 集中配置、内网启动脚本、独立 discover-local/merge-schema/finalize、阶段参数、检查点恢复、截断拆分、unknown 超时状态及北京时间。具体已实现接口和边界以 [使用指南.md](docs/使用指南.md) 为准；下文历史设计示例不全部代表实际命令。无相关任务时不要求 Agent 自动扩展功能。
 
 ### 1. 分离局部 Schema 提取与合并
 
@@ -119,9 +119,9 @@
 ## 新版内网入口与维护
 
 - `scripts/intranet.bat` / `.sh` 仅启动同一 `code_ontology.intranet` Python 入口，日常修改 `.env` 即可；新增配置名以 `.env.example` 为准。原 `.env` 不自动覆盖。
-- 顺序为 init → scan → parse → normalize → prepare → discover-local → merge-schema → extract → finalize → validate → report。status 不持写锁，可在任务运行时查看。普通单步不得隐式启动上游模型任务。
-- 局部与合并的检查点见 `code_ontology/stages.py`，extract/finalize 兼容逻辑在 pipeline.py。修改合并参数不得使未变化的局部请求重新执行。
+- 顺序为 init → scan → parse → normalize → prepare → discover-local → merge-schema → review-schema → extract → finalize → validate → report。merge-schema 先保存合法草稿与对齐问题，review-schema 独立 AI 审查修正；CO_ALLOW_UNREVIEWED_SCHEMA=true 可显式使用未审查 Schema 抽取，必须记录来源状态，不伪造审查通过。status 不持写锁，可在任务运行时查看。普通单步不得隐式启动上游模型任务。
+- 每次合并与审查的逐轮、逐批 Schema/映射历史位于 schema/history/；旧版本不覆盖。局部与合并的检查点见 `code_ontology/stages.py`，extract/finalize 兼容逻辑在 pipeline.py。修改合并参数不得使未变化的局部请求重新执行。
 - 默认 mixed，允许英文/中文共存，保留源码标识符；不强制翻译或为每个函数建立业务概念。无需独立全量“补注释”模型阶段。
 - 新内网启动器与工作台共享输出 OS 写锁；历史直接 CLI 未加入启动器的父锁，不并发写同一输出。
-- 合并无法收敛或遗漏源项时保留 partial、候选和检查点，不承诺任意规模最终 Schema 可放入单次响应。模块候选可供显式独立实验使用，操作见 INTRANET_STEPS.md。
+- 合并无法收敛或结构/引用无效时保留 partial、候选和检查点；缺少的源映射显式保留为 unresolved，不阻止合法草稿输出，不承诺任意规模最终 Schema 可放入单次响应。模块候选可供显式独立实验使用，操作见 使用指南.md。
 - 恢复检查运行 `python -m unittest tests.test_intranet -v`；完整测试与真实解析器检查沿用上文命令。日志不得包含密钥，模拟接口通过不等于真实模型语义验收。

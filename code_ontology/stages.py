@@ -8,6 +8,9 @@ import time
 
 from .llm import LLM, BudgetError, ModelFailure, RequestUnknown
 from .models import Ontology, supported_ids
+from .schema_history import SchemaHistory, split_location
+from .schema_merge import (MERGE_FORMAT, MergeResponse, canonical_merge, coalesce, compose,
+                           final_mapping, initial_candidates, merge_payload, validate_merge, alignment_findings, retain_missing_sources)
 from .util import canonical, digest, now, read_json, unique, write_json, write_jsonl
 
 
@@ -25,14 +28,17 @@ class SchemaStages:
         self.system = prompt(pipeline.policy, pipeline.profile, stage)
         self.root = pipeline.output / "schema"
         self.errors = []
+        self.history = None
+        self.history_location = None
 
     def close(self):
         self.p.stage_stats.append(dict(self.llm.stats))
         self.llm.close()
 
     def signature(self, payload):
+        contract = MergeResponse if self.stage == "merge" else Ontology
         return digest({"input": payload, "prompt": self.system, "settings": self.settings.public(),
-                       "contract": Ontology.model_json_schema(), "format": 1}, 40)
+                       "contract": contract.model_json_schema(), "format": MERGE_FORMAT if self.stage == "merge" else 1}, 40)
 
     def call(self, payload):
         """A successful checkpoint is reused only for precisely matching inputs."""
@@ -41,8 +47,12 @@ class SchemaStages:
         path = self.root / ("local" if self.stage == "discover" else "merge") / f"{key}.json"
         if path.is_file():
             saved = read_json(path)
-            value = Ontology.model_validate(saved["schema"])
             if saved.get("key") == key:
+                if self.stage == "merge":
+                    value = MergeResponse.model_validate({"ontology": saved["schema"], "source_mapping": saved["source_mapping"]})
+                    validate_merge(value, payload, compatibility=False)
+                else:
+                    value = Ontology.model_validate(saved["schema"])
                 return value
         task_path = path.with_suffix(".task.json")
         if task_path.is_file() and read_json(task_path).get("state") == "needs_split":
@@ -53,18 +63,28 @@ class SchemaStages:
         write_json(path.with_suffix(".task.json"), {"key": key, "stage": self.stage, "state": "running",
                    "started_at": now(), "settings": self.settings.public(), "evidence_ids": sorted(allowed)})
         try:
-            result = self.llm.call(self.system, payload, Ontology, self.p.output / "llm_requests",
-                                   lambda r: evidence_check(r, allowed), self.p.namespace)
-            result = canonical_schema(result, self.p.profile)
-            omitted = []
             if self.stage == "merge":
-                for category in ("classes", "relations", "properties"):
-                    target = getattr(result, category)
-                    names = {r.name.casefold() for r in target}
-                    names |= {a.casefold() for r in target for a in getattr(r, "aliases", [])}
-                    omitted += [{"category": category, "source": row, "reason": "not_matched_by_name_or_alias; review_semantic_alignment"}
-                                for s in items for row in s[category] if row["name"].casefold() not in names]
-            write_json(path, {"key": key, "schema": result.model_dump(), "unmatched_source_items": omitted,
+                def validate_candidate(value):
+                    # A readable typed candidate exists even if the mapping needs repair.
+                    write_json(path.with_suffix(".candidate.json"), value.ontology.model_dump())
+                    if self.history is not None:
+                        self.history_candidate += 1
+                        self.history.snapshot(f"{self.history_location}/candidate-{self.history_candidate:03d}",
+                            [value.ontology.model_dump()], state="candidate_not_validated",
+                            mapping=[m.model_dump() for m in value.source_mapping], checkpoint=key)
+                    retain_missing_sources(value, payload)
+                    validate_merge(value, payload, compatibility=False)
+                result = self.llm.call(self.system, payload, MergeResponse, self.p.output / "llm_requests",
+                                       validate_candidate, self.p.namespace)
+                result = canonical_merge(result, payload, self.p.profile, compatibility=False)
+                schema = result.ontology
+                extra = {"source_mapping": [m.model_dump() for m in result.source_mapping], "format": MERGE_FORMAT}
+            else:
+                result = self.llm.call(self.system, payload, Ontology, self.p.output / "llm_requests",
+                                       lambda r: evidence_check(r, allowed), self.p.namespace)
+                result = canonical_schema(result, self.p.profile)
+                schema, extra = result, {}
+            write_json(path, {"key": key, "schema": schema.model_dump(), **extra,
                               "settings": self.settings.public(), "prompt_hash": digest(self.system)})
             write_json(path.with_suffix(".task.json"), {"key": key, "stage": self.stage, "state": "success", "ended_at": now()})
             return result
@@ -196,53 +216,82 @@ class SchemaStages:
     def merge(self):
         local = self.verify_local()
         from .pipeline import prompt
-        candidates = local["schemas"]
+        candidates, registry = initial_candidates(local["schemas"])
+        self.history = SchemaHistory(self.root, "merge", self.signature({"local_key": local["key"]}))
+        self.history.snapshot("input", [c["schema"] for c in candidates], mapping={"lineage": candidates, "sources": registry})
+        print(f"SCHEMA_HISTORY={self.history.root}", flush=True)
         self.p.save_state("merge-schema", "running")
         write_json(self.root / "merge-status.json", {"state": "running", "started_at": now(), "local_key": local["key"]})
         audit_paths = []
+        write_jsonl(self.root / "unresolved.jsonl", [])
         try:
             for round_number in range(self.p.policy["merge_max_rounds"]):
                 # Budget grouping never submits an oversized request; single overflows remain explicit.
                 from .pipeline import group_batches
-                make = lambda rows: {"stage": "merge", "profile": self.p.profile, "candidates": rows}
+                make = lambda rows: merge_payload([c["schema"] for c in rows], self.p.profile)[0]
                 by_module = round_number == 0 and len(local.get("modules", {})) > 1
                 shift = round_number % max(1, len(candidates))
                 reordered = candidates[shift:] + candidates[:shift]
-                groups = list(local["modules"].values()) if by_module else [reordered]
+                groups = [initial_candidates(rows)[0] for rows in local["modules"].values()] if by_module else [reordered]
                 batches = [batch for group in groups for batch in group_batches(group, self.system, self.llm, make, self.p.policy["merge_batch_items"])]
                 merged = []
-                def merge_batch(batch, depth=0):
+                def merge_batch(batch, location, depth=0):
                     try:
                         payload = make(batch)
+                        self.history_location, self.history_candidate = location, 0
                         value = self.call(payload)
                         audit_paths.append(self.root / "merge" / f"{self.signature(payload)}.json")
-                        return [value.model_dump()]
+                        _, sources = merge_payload([c["schema"] for c in batch], self.p.profile)
+                        composed = compose(batch, value, sources)
+                        self.history.snapshot(f"{location}/result", [composed["schema"]],
+                            mapping={"source_mapping": [m.model_dump() for m in value.source_mapping], "lineage": composed},
+                            checkpoint=self.signature(payload))
+                        return [composed]
                     except BudgetError:
                         if len(batch) < 2 or depth >= self.p.policy["recovery_max_depth"]:
                             raise
                         cut = len(batch) // 2
-                        return merge_batch(batch[:cut], depth + 1) + merge_batch(batch[cut:], depth + 1)
+                        return (merge_batch(batch[:cut], split_location(location, 1), depth + 1) +
+                                merge_batch(batch[cut:], split_location(location, 2), depth + 1))
                 for i, batch in enumerate(batches):
                     print(f"MERGE round={round_number+1} batch={i+1}/{len(batches)} items={len(batch)} started={now()}", flush=True)
-                    merged += merge_batch(batch)
+                    merged += merge_batch(batch, f"round-{round_number+1:03d}/batch-{i+1:03d}")
                     write_json(self.root / "merge-status.json", {"state": "running", "round": round_number+1,
                                "completed": i+1, "total": len(batches), "local_key": local["key"], "updated_at": now()})
-                merged = sorted(unique(merged), key=canonical)
+                merged = coalesce(merged)
+                self.history.snapshot(f"round-{round_number+1:03d}/result", [c["schema"] for c in merged], mapping=merged)
                 write_json(self.root / "rounds" / f"{digest([local['key'], self.system, self.settings.public(), round_number])}.json",
-                           {"round": round_number+1, "schemas": merged, "local_key": local["key"]})
+                           {"round": round_number+1, "schemas": [c["schema"] for c in merged],
+                            "lineage": merged, "local_key": local["key"], "format": MERGE_FORMAT})
                 if len(merged) == 1:
-                    value = Ontology.model_validate(merged[0])
-                    omitted = [row for file in audit_paths for row in read_json(file).get("unmatched_source_items", [])]
-                    write_jsonl(self.root / "unresolved.jsonl", unique(omitted))
-                    if omitted:
-                        raise IncompleteStage("Merge omitted source items; inspect schema/unresolved.jsonl and merge checkpoints")
+                    value = Ontology.model_validate(merged[0]["schema"])
+                    mapping = final_mapping(merged[0], registry)
+                    audit = {"format": MERGE_FORMAT, "local_key": local["key"], "schema_hash": digest(value.model_dump()),
+                             "sources": mapping, "checkpoints": sorted({p.relative_to(self.root).as_posix() for p in audit_paths}),
+                             "review_status": "machine_generated_not_human_verified"}
+                    write_json(self.root / "source-mapping.json", audit)
+                    original_payload, _ = merge_payload(local["schemas"], self.p.profile)
+                    mapped = MergeResponse(ontology=value, source_mapping=[
+                        {"source_id": row["source_id"], "target_id": row["target_id"],
+                         "action": "unresolved" if row["state"] == "unresolved" else "merge",
+                         "reason": row.get("reason", "Composed across merge checkpoints")} for row in mapping])
+                    findings = alignment_findings(mapped, original_payload)
+                    write_jsonl(self.root / "unresolved.jsonl", findings)
+                    write_json(self.root / "draft-schema.json", value.model_dump())
+                    write_json(self.root / "draft-source-mapping.json", audit)
                     write_json(self.root / "schema.json", value.model_dump())
                     write_json(self.root / "provenance.json", {"schema_hash": digest(value.model_dump()),
                                "packs_hash": digest(self.p.packs), "prompt_hash": digest(prompt(self.p.policy, self.p.profile, "discover") + self.system),
                                "local_key": local["key"], "failed_tasks": 0, "selected_packs": len(local["selected"]),
                                "merge_settings": self.settings.public(), "merge_prompt_hash": digest(self.system),
-                               "total_packs": len(self.p.packs), "review_status": "machine_generated_not_human_verified"})
-                    write_json(self.root / "merge-status.json", {"state": "success", "local_key": local["key"], "ended_at": now()})
+                               "merge_format": MERGE_FORMAT, "source_mapping_hash": digest(audit),
+                               "total_packs": len(self.p.packs), "review_status": "pending_ai_review", "alignment_issues": len(findings)})
+                    write_json(self.root / "review-status.json", {"state": "stale", "reason": "merge generated a draft", "updated_at": now()})
+                    write_json(self.root / "merge-status.json", {"state": "success", "quality_state": "pending_ai_review",
+                               "alignment_issues": len(findings), "local_key": local["key"], "history": str(self.history.root), "ended_at": now()})
+                    self.history.snapshot("final", [value.model_dump()], mapping=audit, alignment_issues=findings)
+                    self.history.finish("success", quality_state="pending_ai_review")
+                    print(f"SCHEMA={self.root / 'schema.json'} alignment_issues={len(findings)} review=pending; Next: intranet review-schema", flush=True)
                     self.p.save_state("merge-schema", "success", schema_hash=digest(value.model_dump()))
                     self.p.save_state("discover", "success", schema_hash=digest(value.model_dump()))
                     return value
@@ -250,10 +299,12 @@ class SchemaStages:
                     raise IncompleteStage("Merge cannot reduce within output/input budget; module schemas retained. Adjust merge budget or partition scope")
                 candidates = merged
             raise IncompleteStage("Merge rounds exhausted; checkpoints retained")
-        except Exception as exc:
-            write_json(self.root / "module-schemas.json", {"schemas": candidates, "note": "Unaligned candidates; not a complete global ontology"})
+        except BaseException as exc:
+            self.history.finish("partial", error=self.llm.safe_error(exc))
+            write_json(self.root / "module-schemas.json", {"schemas": [c["schema"] for c in candidates],
+                       "lineage": candidates, "note": "Unaligned candidates; not a complete global ontology"})
             write_json(self.root / "merge-status.json", {"state": "partial", "error": self.llm.safe_error(exc),
-                       "local_key": local["key"], "ended_at": now()})
+                       "local_key": local["key"], "history": str(self.history.root), "ended_at": now()})
             self.p.save_state("merge-schema", "partial", error=self.llm.safe_error(exc))
             raise
 
@@ -266,5 +317,8 @@ class SchemaStages:
         record = read_json(provenance)
         if record.get("local_key") != local["key"] or record.get("merge_settings") != self.settings.public() or record.get("merge_prompt_hash") != digest(self.system):
             raise IncompleteStage("Merge inputs/settings changed; run merge-schema first")
-        if record["schema_hash"] != digest(read_json(self.root / "schema.json")):
+        mapping_path = self.root / "draft-source-mapping.json"
+        if record.get("merge_format") != MERGE_FORMAT or not mapping_path.is_file() or record.get("source_mapping_hash") != digest(read_json(mapping_path)):
+            raise IncompleteStage("Merge provenance missing/changed; run merge-schema first")
+        if record["schema_hash"] != digest(read_json(self.root / "draft-schema.json")):
             raise IncompleteStage("Merged schema modified; rerun merge-schema or explicitly select reviewed schema")

@@ -21,6 +21,38 @@ EXTRACT_CONTRACT = """JSON shape (all top-level arrays required):
 {"entities":[{"id":"e1","name":"SourceEntity","type_id":"ID from schema","scope":"code_definition","basis":"direct","evidence_ids":["ev_..."]}],"relations":[{"subject":"e1","relation_id":"ID from schema","object":"e1","basis":"direct","evidence_ids":["ev_..."]}],"attributes":[{"subject":"e1","property_id":"ID from schema","value":"example","unit":null,"basis":"direct","evidence_ids":["ev_..."]}],"rules":[{"name":"ThresholdRule","condition":"Original condition and configuration constraints","action":"Action implemented in code","scope":"code_definition","basis":"direct","evidence_ids":["ev_..."]}],"candidates":[{"reason":"Why the item cannot fit the fixed schema","payload":{}}]}
 scope is code_definition/configuration_record/test/example; basis is direct/inferred. Declare all entity endpoints in the same response. Empty arrays are valid. No extra keys."""
 
+# Keep the discovery prompt stable so a merge-only upgrade can reuse local manifests.
+_MERGE_EXAMPLE = json.loads(SCHEMA_CONTRACT.splitlines()[1])
+for _category in ("relations", "properties"):
+    _MERGE_EXAMPLE[_category][0]["aliases"] = []
+MERGE_CONTRACT = ("Return exactly this outer JSON shape (no extra keys):\n" + json.dumps({
+    "ontology": _MERGE_EXAMPLE,
+    "source_mapping": [{"source_id": "s_ID_FROM_INPUT", "target_id": "c1",
+                        "action": "preserve", "reason": "Same concept; original label retained as alias"}]}) +
+    "\nEvery input candidate item ID is a globally unique source_id. Map EVERY classes/relations/properties item exactly once. "
+    "target_id references an output ontology item in the SAME category. action is preserve/merge/unresolved. "
+    "Different sources may share a target only when equivalent. For unresolved use target_id:null and explain the conflict; never omit a source. "
+    "Every output item must have a mapped source. Output IDs may differ from input IDs. "
+    "Ontology datatype is string/number/integer/boolean; parents/domain/range reference its declared class IDs. "
+    "Preserve mapped parents, relation direction/domain/range, property datatype/unit. "
+    "An integer/number conflict may safely widen to number, never narrow number to integer; keep other datatype/unit conflicts separate. "
+    "All three categories support aliases. "
+    "Use separate items when meanings differ; do not force a merge just to reduce item counts.")
+REVIEW_CONTRACT = ("Return one JSON object with exactly ontology, source_mapping, issues. ontology uses this shape:\n" +
+    json.dumps(_MERGE_EXAMPLE) + "\nsource_mapping is an array of {source_id,target_id,action,reason}; "
+    "map exactly every source_items.item.id once, using preserve/merge/unresolved (null target only for unresolved). "
+    "issues is an array of {source_ids:[],target_ids:[],severity:info|warning|error,status:fixed|unresolved,description:string}. "
+    "Return the COMPLETE corrected current_schema; keep existing IDs stable when editing definitions, names, references and types. "
+    "Add a supported item and remap relevant sources when meanings must split. Never delete an item still used by another source mapping or reference. "
+    "Only update mappings for source_items; class_context shows referenced source classes and their current target mappings. "
+    "All source_items must remain mapped; every output item must have a mapped source. "
+    "The original local schemas are model hypotheses, not ground truth. Usually preserve their direction/domain/range/parents, datatype and unit. "
+    "If source code proves original metadata wrong, correct it and emit an explicit fixed issue listing the original source_id, "
+    "its corrected target_id, and a concrete code-based explanation. The target must retain supporting evidence IDs of that source. "
+    "Do not label an unfixed inconsistency fixed just to pass checks. For uncertainty report an unresolved issue; for a blocking contradiction use severity error. "
+    "For genuinely different meanings keep separate items; integer may widen to number without loss. Evidence IDs must be supplied in current_schema/source_items/evidence_packs. "
+    "No extra keys in schema or mapping; property datatype is string/number/integer/boolean.")
+
 
 def prompt(policy: dict, profile: str, stage: str) -> str:
     directory = Path(policy["prompt_dir"]) if policy.get("prompt_dir") else RESOURCE / "prompts"
@@ -30,7 +62,8 @@ def prompt(policy: dict, profile: str, stage: str) -> str:
     guidance = {"mixed": "English and Chinese may coexist. Prefer original source names; translate only when reliable.",
                 "en": "Use English readable labels and definitions, preserving original source identifiers.",
                 "zh": "Use Chinese explanations where reliable, preserving original source identifiers and technical names."}[language]
-    return common + "\n" + special + "\n" + guidance + "\n" + (EXTRACT_CONTRACT if stage == "extract" else SCHEMA_CONTRACT)
+    contract = {"extract": EXTRACT_CONTRACT, "merge": MERGE_CONTRACT, "review": REVIEW_CONTRACT}.get(stage, SCHEMA_CONTRACT)
+    return common + "\n" + special + "\n" + guidance + "\n" + contract
 
 
 def evidence_check(result: Ontology, allowed: set[str]):
@@ -39,7 +72,7 @@ def evidence_check(result: Ontology, allowed: set[str]):
         raise ValueError(f"Unknown evidence IDs: {sorted(unknown)[:10]}")
 
 
-def canonical_schema(schema: Ontology, profile: str) -> Ontology:
+def canonical_schema(schema: Ontology, profile: str, *, return_id_map=False):
     data = schema.model_dump()
     remap = {r["id"]: "c_" + digest([r["name"].casefold(), r["definition"]]) for r in data["classes"]}
     grouped = {}
@@ -56,17 +89,22 @@ def canonical_schema(schema: Ontology, profile: str) -> Ontology:
     for category, prefix in (("relations", "r_"), ("properties", "p_")):
         grouped = {}
         for row in data[category]:
+            old_id = row["id"]
             row["domain"] = sorted({remap[x] for x in row["domain"]})
             if "range" in row:
                 row["range"] = sorted({remap[x] for x in row["range"]})
-            row["id"] = prefix + digest({k: v for k, v in row.items() if k not in {"id", "evidence_ids"}})
+            row["aliases"] = sorted(set(row["aliases"]))
+            row["id"] = prefix + digest({k: v for k, v in row.items() if k not in {"id", "evidence_ids", "aliases"}})
+            remap[old_id] = row["id"]
             if row["id"] in grouped:
                 grouped[row["id"]]["evidence_ids"] = sorted(set(grouped[row["id"]]["evidence_ids"] + row["evidence_ids"]))
+                grouped[row["id"]]["aliases"] = sorted(set(grouped[row["id"]]["aliases"] + row["aliases"]))
             else:
                 grouped[row["id"]] = row
         data[category] = sorted(grouped.values(), key=lambda x: x["id"])
     data["version"] = "0.1"; data["profile"] = profile
-    return Ontology.model_validate(data)
+    value = Ontology.model_validate(data)
+    return (value, remap) if return_id_map else value
 
 
 def selected_packs(packs: list[dict], limit: int):
@@ -160,6 +198,14 @@ class Pipeline:
         finally:
             runner.close()
 
+    def review_schema(self):
+        from .schema_review import SchemaReview
+        runner = SchemaReview(self)
+        try:
+            return runner.run()
+        finally:
+            runner.close()
+
     def save_state(self, stage, status, **detail):
         self.state["stages"][stage] = {"state": status, "updated_at": now(), **detail}
         write_json(self.output / "run_manifest.json", self.state)
@@ -200,7 +246,8 @@ class Pipeline:
 
     def discover(self):
         self.discover_local()
-        return self.merge_schema()
+        self.merge_schema()
+        return self.review_schema()
 
     def fixed_schema(self, supplied: Path | None = None, update=False):
         path = supplied or self.output / "schema" / "schema.json"
@@ -280,7 +327,10 @@ class Pipeline:
             def validator(result, allowed=allowed):
                 found = {eid for category in (result.entities, result.relations, result.attributes, result.rules) for row in category for eid in row.evidence_ids}
                 if found - allowed:
-                    raise ValueError("Extraction references evidence outside this task")
+                    raise ValueError("Extraction references evidence outside this task: " + canonical(sorted(found - allowed)) +
+                                     ". Use only this pack's evidence IDs: " + canonical(sorted(allowed)) +
+                                     ". The fixed schema's evidence IDs describe type provenance, not evidence for this extraction. "
+                                     "Keep an assertion only if the current pack's code supports it; otherwise remove it.")
 
             jobs.append({"id": tid, "evidence_ids": list(allowed), "path": self.output / "extraction" / f"{tid}.json",
                          "call": lambda payload=payload, validator=validator: self.extract_task(system, payload, validator)})
@@ -432,6 +482,7 @@ class Pipeline:
         write_json(self.output / "final" / "schema.json", schema.model_dump())
         assertions = sum(len(final[k]) for k in ("entities", "relations", "attributes", "rules"))
         metrics = {"status": "partial" if self.errors else "success", "human_verified": False,
+                   "schema_scope": read_json(self.output / "schema-scope.json") if (self.output / "schema-scope.json").is_file() else {"review_state": "direct_pipeline_or_explicit_schema"},
                    "parser": self.state["parser"],
                    "view": self.view, "profile": self.profile, "schema_classes": len(schema.classes),
                    "schema_relations": len(schema.relations), "schema_properties": len(schema.properties),
@@ -461,6 +512,8 @@ def report_run(output: Path):
     clean = lambda s: str(s).replace("|", "\\|").replace("\n", " ")
     text += [f"| {clean(c['name'])} | {clean(c['definition'])} | {', '.join(c['evidence_ids'])} |" for c in schema["classes"]]
     text += ["", "## 追溯", "", "- schema/schema.json：固定 schema；schema/selection.json：发现范围。",
+             "- schema/draft-schema.json：原始合并草稿；schema/review-report.json：AI 审查记录。",
+             "- schema-scope.json：Schema 选择及是否显式跳过 AI 审查。",
              "- extraction/selection.json：实例任务与被省略的 schema 项。",
              "- evidence.jsonl：证据到源码快照的路径和行号。",
              "- llm_requests/：渲染后的请求、原始回答与实际参数。",

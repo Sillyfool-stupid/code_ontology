@@ -68,6 +68,27 @@ class ViewerReviewTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             self.store.evidence(self.rid, "bad")
 
+    def test_schema_history_rounds_are_readable_and_remain_read_only(self):
+        from code_ontology.schema_history import SchemaHistory
+        history = SchemaHistory(self.run / "schema", "merge", "fixture-key")
+        history.snapshot("round-001/result", [self.schema, self.schema])
+        history.snapshot("round-002/result", [self.schema])
+        history.finish("success")
+        before = self.fingerprint()
+        rows = self.store.detail(self.rid)["schema_history"]
+        self.assertEqual(len(rows), 3)
+        result = self.store.schema_snapshot(self.rid, rows[0]["path"])
+        self.assertEqual(result["schema"]["classes"][0]["name"], "设备")
+        self.assertIn("device", result["schema_record_ids"]["classes"])
+        with self.assertRaises(KeyError):
+            self.store.schema_snapshot(self.rid, "../../.env")
+        self.assertEqual(before, self.fingerprint())
+        # Even a corrupt history manifest cannot expose another output artifact.
+        manifest = history.manifest
+        manifest["snapshots"].append({"schemas": ["../../../../run_manifest.json"]})
+        write_json(history.root / "manifest.json", manifest)
+        self.assertEqual(len(self.store.schema_history(self.rid)), 3)
+
     def test_http_static_api_and_no_write_routes(self):
         server = make_server(self.root, 0)
         thread = threading.Thread(target=server.serve_forever, daemon=True)

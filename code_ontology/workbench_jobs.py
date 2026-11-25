@@ -28,7 +28,7 @@ STAGES = [
     ("doctor", "检查环境", False), ("connection", "测试模型连接", True),
     ("scan", "扫描仓库", False), ("parse", "解析并导出结构", False),
     ("prepare", "生成模型输入包", False), ("discover-local", "局部 Schema 提取", True),
-    ("merge-schema", "合并 Schema（可独立恢复）", True), ("discover", "发现并合并 Schema（兼容）", True),
+    ("merge-schema", "合并 Schema（保存草稿）", True), ("review-schema", "AI 审查并修正 Schema", True), ("discover", "发现并合并 Schema（兼容）", True),
     ("extract", "抽取实例与规则", True), ("finalize", "归并实例产物", False), ("validate", "校验结果", False),
     ("evaluate", "匹配参考概念", False), ("report", "生成对比报告", False),
     ("sample", "生成审核表", False), ("summarize", "汇总人工审核", False),
@@ -37,7 +37,7 @@ STAGES = [
 MODEL_ENV = {"base_url": "OPENAI_BASE_URL", "api_key": "OPENAI_API_KEY", "model": "OPENAI_MODEL",
              "timeout": "LLM_TIMEOUT_SECONDS", "retries": "LLM_MAX_RETRIES", "concurrency": "LLM_CONCURRENCY",
              "temperature": "LLM_TEMPERATURE", "context_tokens": "LLM_CONTEXT_TOKENS",
-             "max_output_tokens": "LLM_MAX_OUTPUT_TOKENS", "json_mode": "LLM_JSON_MODE", "joern_home": "JOERN_HOME",
+             "max_output_tokens": "LLM_MAX_OUTPUT_TOKENS", "send_max_tokens": "LLM_SEND_MAX_TOKENS", "json_mode": "LLM_JSON_MODE", "joern_home": "JOERN_HOME",
              "ca_bundle": "LLM_CA_BUNDLE", "thinking": "LLM_THINKING"}
 ACTIVE = {"queued", "running", "cancelling"}
 
@@ -175,6 +175,8 @@ class Workbench:
         graph = stamp(snap / "normalized" / w["view"] / "index.json") if snap else None
         packs = stamp(snap / "prepared" / w["view"] / "index.json") if snap else None
         schema = file_hash(run / "schema" / "schema.json") if run and (run / "schema" / "schema.json").is_file() else None
+        draft = file_hash(run / "schema/draft-schema.json") if run and (run / "schema/draft-schema.json").is_file() else None
+        draft_mapping = file_hash(run / "schema/draft-source-mapping.json") if run and (run / "schema/draft-source-mapping.json").is_file() else None
         base = {"snapshot": w["snapshot"], "view": w["view"], "profile": w["profile"], "experiment": w["experiment"]}
         if stage in {"doctor", "connection"}:
             return digest({"stage": stage, "settings": settings.public(), "parser": select_backend(policy, settings)})
@@ -182,16 +184,18 @@ class Workbench:
             return digest({"snapshot": w["snapshot"], "policy": {k: policy[k] for k in scan_keys}, "parser": select_backend(policy, settings), "joern_home": settings.joern_home})
         if stage == "prepare":
             return digest({**base, "graph": graph, "pack_policy": {k: policy[k] for k in pack_keys}})
-        if stage in {"discover", "discover-local", "merge-schema", "finalize", "extract"}:
+        if stage in {"discover", "discover-local", "merge-schema", "review-schema", "finalize", "extract"}:
             selected_prompts = {k: v for k, v in prompts.items() if k.startswith("common/") or k.startswith(w["profile"] + "/")}
             effective = settings.public()
-            if stage in {"extract", "finalize", "discover-local", "merge-schema"}:
-                stage_name = {"discover-local": "discover", "merge-schema": "merge", "finalize": "extract", "extract": "extract"}[stage]
+            if stage in {"extract", "finalize", "discover-local", "merge-schema", "review-schema"}:
+                stage_name = {"discover-local": "discover", "merge-schema": "merge", "review-schema": "review", "finalize": "extract", "extract": "extract"}[stage]
                 effective = settings.for_stage(stage_name).public()
                 selected_prompts = {k: v for k, v in selected_prompts.items() if k.startswith("common/") or k.endswith(f"/{stage_name}.txt")}
             if stage == "extract":
                 selected_prompts = {k:v for k,v in selected_prompts.items() if "/discover." not in k and "/merge." not in k}
             return digest({**base, "packs": packs, "schema": schema if stage in {"extract", "finalize"} else None,
+                           "review_inputs": [draft, draft_mapping, policy["review_batch_items"], policy["review_max_rounds"]] if stage == "review-schema" else None,
+                           "allow_unreviewed": policy["allow_unreviewed_schema"] if stage == "extract" else None,
                            "local": stamp(Path(w["snapshot"]) / "runs" / w["experiment"] / w["view"] / w["profile"] / "schema/local-manifest.json") if stage == "merge-schema" and w["snapshot"] else None,
                            "settings": effective, "output_language": policy["output_language"],
                            "prompts": selected_prompts, "pack_policy": {k:policy[k] for k in pack_keys},
@@ -235,15 +239,15 @@ class Workbench:
         r = self.roots(w)
         snap, run = r.get("snapshot"), r.get("run")
         required = []
-        if stage in {"parse", "prepare", "discover", "discover-local", "merge-schema", "finalize", "extract", "validate", "evaluate", "report", "sample", "summarize"} and not snap:
+        if stage in {"parse", "prepare", "discover", "discover-local", "merge-schema", "review-schema", "finalize", "extract", "validate", "evaluate", "report", "sample", "summarize"} and not snap:
             return ["请先扫描/解析或选择已有快照"]
-        if snap and stage in {"prepare", "discover", "discover-local", "merge-schema", "finalize", "extract", "validate"} and w["view"] not in snapshot_parser(snap)["available_views"]:
+        if snap and stage in {"prepare", "discover", "discover-local", "merge-schema", "review-schema", "finalize", "extract", "validate"} and w["view"] not in snapshot_parser(snap)["available_views"]:
             return ["当前快照仅支持 AST，请保存工作区以切换视图"]
-        if stage in {"prepare", "discover", "discover-local", "merge-schema", "finalize", "extract"}:
+        if stage in {"prepare", "discover", "discover-local", "merge-schema", "review-schema", "finalize", "extract"}:
             required += [snap / "normalized" / w["view"] / "index.json"]
-        if stage in {"discover", "discover-local", "merge-schema", "finalize", "extract", "validate"}:
+        if stage in {"discover", "discover-local", "merge-schema", "review-schema", "finalize", "extract", "validate"}:
             required += [snap / "prepared" / w["view"] / "packs.jsonl"]
-        if stage in {"discover", "discover-local", "merge-schema", "finalize", "extract"} and snap:
+        if stage in {"discover", "discover-local", "merge-schema", "review-schema", "finalize", "extract"} and snap:
             prepared = snap / "prepared" / w["view"] / "index.json"
             graph_index = snap / "normalized" / w["view"] / "index.json"
             if prepared.is_file() and graph_index.is_file():
@@ -256,10 +260,17 @@ class Workbench:
                     return ["证据包与当前图/预算不一致，请先重新生成模型输入包"]
         if stage == "merge-schema":
             required += [run / "schema" / "local-manifest.json"]
+        if stage == "review-schema":
+            required += [run / "schema/draft-schema.json", run / "schema/draft-source-mapping.json"]
         if stage == "finalize":
             required += [run / "extraction" / "manifest.json"]
         if stage == "extract":
             required += [run / "schema" / "schema.json"]
+            if (run / "schema/local-manifest.json").is_file():
+                policy, _ = self.settings(w)
+                status = run / "schema/review-status.json"
+                if not policy["allow_unreviewed_schema"] and (not status.is_file() or read_json(status).get("state") != "success"):
+                    return ["请先完成 AI 审查并修正 Schema；仅显式设置 CO_ALLOW_UNREVIEWED_SCHEMA=true 才可使用草稿抽取"]
         if stage in {"validate", "evaluate", "sample"}:
             required += [run / "final" / "schema.json"]
         if stage == "evaluate":
@@ -286,11 +297,11 @@ class Workbench:
                                                                     or latest.get("schema_prompt_matches") is False))})
         roots = self.roots(w)
         return {"workspace": w, "settings": settings.public(), "policy": policy, "parser": info, "fingerprint": fingerprint,
-                "stage_settings": {s: settings.for_stage(s).public() for s in ("discover", "merge", "extract")},
+                "stage_settings": {s: settings.for_stage(s).public() for s in ("discover", "merge", "review", "extract")},
                 "configuration_sources": configuration_sources(w["env_file"], w["config"] or None),
                 "stages": stages, "jobs": jobs, "roots": {k: str(v) for k, v in roots.items()},
-                "prompts": {stage: prompt(policy, w["profile"], stage) for stage in ("discover", "merge", "extract")},
-                "prompt_sources": {stage: (Path(policy.get("prompt_dir") or RESOURCE / "prompts") / w["profile"] / f"{stage}.txt").read_text(encoding="utf-8") for stage in ("discover", "merge", "extract")}}
+                "prompts": {stage: prompt(policy, w["profile"], stage) for stage in ("discover", "merge", "review", "extract")},
+                "prompt_sources": {stage: (Path(policy.get("prompt_dir") or RESOURCE / "prompts") / w["profile"] / f"{stage}.txt").read_text(encoding="utf-8") for stage in ("discover", "merge", "review", "extract")}}
 
     def stage_inputs(self, stage, w):
         r = self.roots(w)
@@ -302,7 +313,7 @@ class Workbench:
             inputs["固定源码清单"] = str(snap / "manifest.json")
         if snap and stage == "prepare":
             inputs["规范图索引"] = str(snap / "normalized" / w["view"] / "index.json")
-        if snap and stage in {"discover", "discover-local", "merge-schema", "finalize", "extract", "validate"}:
+        if snap and stage in {"discover", "discover-local", "merge-schema", "review-schema", "finalize", "extract", "validate"}:
             inputs["模型证据包"] = str(snap / "prepared" / w["view"] / "packs.jsonl")
         if run and stage == "extract":
             inputs["固定 Schema（执行时复制）"] = str(run / "schema/schema.json")
@@ -314,7 +325,7 @@ class Workbench:
             inputs["人工参考概念"] = w["gold"]
         if stage == "summarize":
             inputs["人工标签 CSV"] = str(r["reviews"] / f"{w['view']}-{w['profile']}.csv")
-        if stage in {"discover", "discover-local", "merge-schema", "finalize", "extract", "experiment"}:
+        if stage in {"discover", "discover-local", "merge-schema", "review-schema", "finalize", "extract", "experiment"}:
             inputs["实际提示词目录"] = str(Path(self.settings(w)[0].get("prompt_dir") or RESOURCE / "prompts"))
         return inputs
 
@@ -404,10 +415,10 @@ class Workbench:
             return args
         if stage == "prepare":
             return args + [stage, "--snapshot", snap, "--view", w["view"]] + common
-        if stage in {"discover", "discover-local", "merge-schema", "finalize", "extract"}:
+        if stage in {"discover", "discover-local", "merge-schema", "review-schema", "finalize", "extract"}:
             args += [stage, "--snapshot", snap, "--view", w["view"], "--profile", w["profile"], "--experiment", w["experiment"]] + common
             if stage == "extract":
-                args += ["--defer-finalize", "--schema", str(run / "schema" / "schema.json")]
+                args += ["--defer-finalize", "--schema", str(run / "schema" / "schema.json"), "--require-schema-review"]
             elif options.get("update_schema"):
                 args += ["--update-schema"]
             return args
@@ -468,9 +479,9 @@ class Workbench:
             environment = dict(os.environ)
             for field, key in MODEL_ENV.items():
                 environment[key] = str(getattr(settings, field))
-            for stage_name in ("discover", "merge", "extract"):
+            for stage_name in ("discover", "merge", "review", "extract"):
                 overrides = settings.stage_overrides.get(stage_name, {})
-                for attr in ("context_tokens", "max_output_tokens", "timeout", "retries", "concurrency"):
+                for attr in ("context_tokens", "max_output_tokens", "send_max_tokens", "timeout", "retries", "concurrency"):
                     value = overrides.get(attr, "")
                     suffix = MODEL_ENV[attr].removeprefix("LLM_")
                     environment[f"LLM_{stage_name.upper()}_{suffix}"] = str(value)
@@ -542,6 +553,8 @@ class Workbench:
             files = [run / "schema/local-manifest.json", run / "schema/selection.json"]
         elif stage == "merge-schema" and run:
             files = [run / "schema/schema.json", run / "schema/merge-status.json", run / "schema/provenance.json"]
+        elif stage == "review-schema" and run:
+            files = [run / "schema/schema.json", run / "schema/review-status.json", run / "schema/review-report.json"]
         elif stage == "extract" and run:
             files = [run / "extraction/manifest.json", run / "extraction/selection.json"]
         elif stage == "finalize" and run:
@@ -563,8 +576,8 @@ class Workbench:
             raise ValueError("产物报告检查未通过")
         if stage == "finalize" and read_json(run / "metrics.json").get("status") != "success":
             raise ValueError("实例产物未全部成功，请检查 metrics 和失败记录")
-        if stage in {"discover-local", "merge-schema", "extract"}:
-            check = {"discover-local": "schema/local-manifest.json", "merge-schema": "schema/merge-status.json", "extract": "extraction/manifest.json"}[stage]
+        if stage in {"discover-local", "merge-schema", "review-schema", "extract"}:
+            check = {"discover-local": "schema/local-manifest.json", "merge-schema": "schema/merge-status.json", "review-schema": "schema/review-status.json", "extract": "extraction/manifest.json"}[stage]
             if read_json(run / check).get("state") != "success":
                 raise ValueError("阶段部分完成，请查看未完成任务")
 
@@ -634,7 +647,7 @@ class Workbench:
             state = "succeeded" if code == 0 else "failed"
             if self.job(jid)["state"] == "cancelling":
                 state = "cancelled"
-            elif code and w["snapshot"] and job["stage"] in {"discover", "discover-local", "merge-schema", "finalize", "extract", "experiment"}:
+            elif code and w["snapshot"] and job["stage"] in {"discover", "discover-local", "merge-schema", "review-schema", "finalize", "extract", "experiment"}:
                 run = self.roots(w)["run"]
                 if job["stage"] == "experiment":
                     summary = Path(w["snapshot"]) / "runs" / w["experiment"] / "comparison.json"
@@ -688,7 +701,7 @@ class Workbench:
         return self.preview.read(path, offset=offset) if path.is_file() else {"text": "", "next_offset": 0}
 
     def prompt_copy(self, wid, stage, text):
-        if stage not in {"discover", "merge", "extract"} or len(text) > 100000:
+        if stage not in {"discover", "merge", "review", "extract"} or len(text) > 100000:
             raise ValueError("提示词阶段或长度无效")
         with self.lock:
             if any(j["state"] in ACTIVE for j in self.jobs(wid)):

@@ -24,6 +24,7 @@ class RelationType(Supported):
     id: str = Field(min_length=1)
     name: str = Field(min_length=1)
     definition: str = Field(min_length=1)
+    aliases: list[str] = Field(default_factory=list)
     domain: list[str] = Field(min_length=1)
     range: list[str] = Field(min_length=1)
 
@@ -32,6 +33,7 @@ class PropertyType(Supported):
     id: str = Field(min_length=1)
     name: str = Field(min_length=1)
     definition: str = Field(min_length=1)
+    aliases: list[str] = Field(default_factory=list)
     domain: list[str] = Field(min_length=1)
     datatype: Literal["string", "number", "integer", "boolean"]
     unit: str | None = None
