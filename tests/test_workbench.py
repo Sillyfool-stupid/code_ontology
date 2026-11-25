@@ -308,7 +308,7 @@ class WorkbenchTests(unittest.TestCase):
         self.service.acknowledge("orphan")
         self.run_stage("scan")
 
-    def test_http_session_origin_artifacts_and_embedded_viewer(self):
+    def test_http_session_origin_artifacts_and_native_ontology(self):
         server = make_server(self.root/"http-control",0,PROJECT,[self.root])
         thread = threading.Thread(target=server.serve_forever,daemon=True);thread.start()
         base = f"http://127.0.0.1:{server.server_port}"
@@ -317,8 +317,12 @@ class WorkbenchTests(unittest.TestCase):
                 return r.read().decode("utf-8")
         token = json.loads(get('/api/bootstrap'))['token']
         try:
-            self.assertIn("步骤工作台",get('/'))
+            index = get('/')
+            self.assertIn("步骤工作台", index)
+            self.assertIn('id="ontology-list"', index)
+            self.assertNotIn('<iframe id="viewer"', index)
             self.assertIn("function renderDetail",get('/app.js'))
+            self.assertIn("function loadOntology",get('/app.js'))
             payload=json.dumps(self.fields).encode()
             for headers in [{}, {"X-Workbench-Token":token,"Origin":"https://evil.invalid"}]:
                 with self.assertRaises(HTTPError) as e:
@@ -333,6 +337,9 @@ class WorkbenchTests(unittest.TestCase):
                     urlopen(Request(base+'/api/cancel',data=b'{"id":"fixture"}',headers={"X-Workbench-Token":token}))
                 self.assertEqual(e.exception.code,500)
                 self.assertIn("process tree remains locked",e.exception.read().decode())
+            runs = json.loads(get('/api/ontology-runs?workspace='+wid+'&mode=schema'))
+            self.assertEqual(runs['runs'], [])
+            # The independent viewer remains available for old bookmarks.
             self.assertIn('/viewer-assets/app.js?workspace=',get('/viewer/?workspace='+wid))
             self.assertIn('/viewer-api/',get('/viewer-assets/app.js?workspace='+wid))
             schema_js = get('/viewer-assets/app.js?workspace='+wid+'&mode=schema')

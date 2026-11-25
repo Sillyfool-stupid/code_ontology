@@ -113,6 +113,8 @@ def make_server(state=None, port=8766, project=PROJECT, browse_roots=None):
                 if path == "/api/artifact":
                     return self.send(service.artifact(a["workspace"], a["root"], a.get("path", ""),
                                                       offset=int(a.get("offset", 0)), limit=int(a.get("limit", 20)), query=a.get("q", "")))
+                if path.startswith("/api/ontology-"):
+                    return self.ontology(path.removeprefix("/api/ontology-"), a)
                 if path == "/api/download":
                     w = service.workspace(a["workspace"])
                     roots = service.roots(w)
@@ -166,6 +168,19 @@ def make_server(state=None, port=8766, project=PROJECT, browse_roots=None):
             elif name == "evidence": data = store.evidence(rid, a["evidence_id"])
             elif name == "artifact": data = store.artifact(rid, a["name"])
             else: raise ValueError("未知展示接口")
+            return self.send(service.redact_data(data, service.settings(w)[1].api_key))
+
+        def ontology(self, name, a):
+            w = service.workspace(a["workspace"])
+            store = WorkspaceArtifacts(w, a.get("mode") == "schema")
+            rid = a.get("id", "")
+            if name == "runs": data = store.listing()
+            elif name == "run": data = store.detail(rid)
+            elif name == "schema-snapshot": data = store.schema_snapshot(rid, a.get("path", ""))
+            elif name == "records": data = store.records(rid, a.get("kind", "entities"), int(a.get("offset", 0)), int(a.get("limit", 50)), a.get("q", ""))
+            elif name == "evidence": data = store.evidence(rid, a["evidence_id"])
+            elif name == "artifact": data = store.artifact(rid, a["name"])
+            else: raise ValueError("未知本体展示接口")
             return self.send(service.redact_data(data, service.settings(w)[1].api_key))
 
         def do_POST(self):
