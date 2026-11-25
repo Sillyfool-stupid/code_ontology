@@ -92,6 +92,7 @@ class WorkbenchTests(unittest.TestCase):
             snap = self.graph()
             self.run_stage("prepare")
             self.run_stage("discover")
+            self.assertEqual(transport["stage_counts"].get("review", 0), 0)
             extracted = self.run_stage("extract")
             self.assertTrue((Path(extracted["log"]).parent / "input-schema.json").is_file())
             extracted = self.run_stage("finalize")
@@ -120,16 +121,27 @@ class WorkbenchTests(unittest.TestCase):
         self.assertNotEqual(changed["workspace"]["config"], str(self.config))
         self.assertEqual(self.config.read_text(encoding="utf-8"), "pack_tokens: 5000\n")
 
-    def test_workbench_draft_requires_review_or_explicit_env_override(self):
-        with fake_server() as (url, _):
-            self.env.write_text(f"OPENAI_BASE_URL={url}\nOPENAI_MODEL=fixture-only\n", encoding="utf-8")
+    def test_workbench_extracts_merged_schema_without_optional_review(self):
+        with fake_server() as (url, state):
+            self.env.write_text(f"OPENAI_BASE_URL={url}\nOPENAI_MODEL=fixture-only\nCO_ALLOW_UNREVIEWED_SCHEMA=false\n", encoding="utf-8")
             self.run_stage("scan"); self.graph(); self.run_stage("prepare")
-            self.run_stage("discover-local"); self.run_stage("merge-schema")
-            with self.assertRaisesRegex(ValueError, "AI 审查"):
+            self.run_stage("discover-local")
+            with self.assertRaisesRegex(ValueError, "合并 Schema"):
                 self.service.submit(self.wid, "extract")
+            self.run_stage("merge-schema")
+            merged = self.run_stage("extract")
+            self.assertNotIn("--require-schema-review", merged["command"])
+            self.assertIn("--require-current-schema", merged["command"])
+            run = self.service.roots(self.service.workspace(self.wid))["run"]
+            self.assertEqual(read_json(run / "schema-scope.json")["review_state"], "merged_unreviewed")
+            self.assertEqual(state["stage_counts"].get("review", 0), 0)
+            strict_command = list(merged["command"]) + ["--require-schema-review"]
+            rejected = subprocess.run(strict_command, cwd=PROJECT, capture_output=True, text=True, encoding="utf-8")
+            self.assertNotEqual(rejected.returncode, 0)
+            self.assertIn("review-schema", rejected.stderr)
             self.run_stage("review-schema")
             reviewed = self.run_stage("extract")
-            self.assertIn("--require-schema-review", reviewed["command"])
+            self.assertEqual(read_json(run / "schema-scope.json")["review_state"], "ai_reviewed_not_human_verified")
             run = self.service.roots(self.service.workspace(self.wid))["run"]
             current = read_json(run / "schema/schema.json")
             altered = json.loads(json.dumps(current))
@@ -143,11 +155,9 @@ class WorkbenchTests(unittest.TestCase):
             self.assertIn("Frozen schema differs", rejected.stderr)
             self.assertEqual(read_json(run / "schema/schema.json"), current)
             self.run_stage("merge-schema")
-            with self.env.open("a", encoding="utf-8") as f:
-                f.write("CO_ALLOW_UNREVIEWED_SCHEMA=true\n")
             self.run_stage("extract")
             run = self.service.roots(self.service.workspace(self.wid))["run"]
-            self.assertEqual(read_json(run / "schema-scope.json")["review_state"], "explicit_unreviewed_override")
+            self.assertEqual(read_json(run / "schema-scope.json")["review_state"], "merged_unreviewed")
 
     def test_frozen_config_and_reused_schema_are_marked_stale(self):
         with fake_server() as (url, _):

@@ -53,7 +53,9 @@ def parser():
     commands["parse"].add_argument("--raw-only", action="store_true")
     commands["extract"].add_argument("--defer-finalize", action="store_true")
     commands["extract"].add_argument("--require-schema-review", action="store_true",
-                                    help="Validate review provenance even when using a frozen --schema copy (workbench)")
+                                    help="Explicitly require successful AI review before extraction")
+    commands["extract"].add_argument("--require-current-schema", action="store_true",
+                                    help="Validate a frozen --schema copy against the current experiment schema")
     commands["doctor"].add_argument("--no-llm", action="store_true")
     commands["doctor"].add_argument("--out", type=Path, default=PROJECT / "outputs" / "doctor")
     commands["report"].add_argument("--snapshot", type=Path)
@@ -184,7 +186,7 @@ def main(argv=None):
     configure_console()
     args = parser().parse_args(argv)
     try:
-        settings = load_settings(args.env_file)
+        settings = load_settings(args.env_file, args.config)
         policy = load_policy(args.config, args.env_file)
         if args.parser_backend:
             policy["parser_backend"] = args.parser_backend
@@ -276,13 +278,14 @@ def main(argv=None):
                     pipeline.finalize_saved()
                 else:
                     supplied = getattr(args, "schema", None)
-                    explicit_schema = bool(supplied) and not getattr(args, "require_schema_review", False)
+                    tracked_schema = getattr(args, "require_schema_review", False) or getattr(args, "require_current_schema", False)
+                    explicit_schema = bool(supplied) and not tracked_schema
                     if command == "extract":
                         supplied = supplied or pipeline.output / "schema" / "schema.json"
                         merge_status = pipeline.output / "schema" / "merge-status.json"
                         if not explicit_schema and merge_status.is_file() and read_json(merge_status)["state"] != "success":
                             raise ValueError("Schema merge incomplete; run merge-schema first")
-                        if getattr(args, "require_schema_review", False):
+                        if tracked_schema:
                             current = pipeline.output / "schema" / "schema.json"
                             if not current.is_file() or read_json(supplied) != read_json(current):
                                 raise ValueError("Frozen schema differs from current schema; refresh the workbench task before extracting")
@@ -290,7 +293,7 @@ def main(argv=None):
                     if command != "discover":
                         if not explicit_schema and (pipeline.output / "schema/local-manifest.json").is_file():
                             from .schema_review import check_schema_use
-                            review_state = check_schema_use(pipeline)
+                            review_state = check_schema_use(pipeline, require_review=getattr(args, "require_schema_review", False))
                             write_json(pipeline.output / "schema-scope.json", {"source": "merged", "review_state": review_state})
                         elif explicit_schema:
                             write_json(pipeline.output / "schema-scope.json", {"source": str(supplied), "review_state": "explicit_schema_selection"})

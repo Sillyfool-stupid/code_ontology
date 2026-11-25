@@ -100,6 +100,14 @@ def make_server(state=None, port=8766, project=PROJECT, browse_roots=None):
                     return self.send(service.job(a["id"]))
                 if path == "/api/log":
                     return self.send(service.logs(a["id"], int(a.get("offset", 0))))
+                if path == "/api/events":
+                    return self.send(service.events(a["id"], int(a.get("offset", 0)), a.get("level", ""), a.get("q", "")))
+                if path == "/api/executions":
+                    return self.send(service.executions(a["workspace"]))
+                if path == "/api/execution-events":
+                    return self.send(service.execution_events(a["workspace"], a["id"], int(a.get("offset", 0)), a.get("level", ""), a.get("q", "")))
+                if path == "/api/execution-log":
+                    return self.send(service.execution_log(a["workspace"], a["id"], int(a.get("offset", 0))))
                 if path == "/api/attempt-file":
                     return self.send(service.attempt_file(a["id"], a["name"]))
                 if path == "/api/artifact":

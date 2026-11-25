@@ -44,6 +44,13 @@ class Settings:
         data["base_url"] = urlunsplit((u.scheme, u.netloc.rsplit("@", 1)[-1], u.path, "", ""))
         return data
 
+    def request_identity(self):
+        """Response semantics and transport capacity, excluding local scheduling."""
+        data = self.public()
+        for key in ("timeout", "retries", "concurrency", "joern_home", "ca_bundle", "stage_overrides"):
+            data.pop(key, None)
+        return data
+
 
 def env_values(env_file=None):
     path = Path(env_file) if env_file else PROJECT / ".env"
@@ -58,7 +65,9 @@ def parse_bool(value):
     return value.lower() in {"true", "1", "yes"}
 
 
-def load_settings(env_file: str | None = None) -> Settings:
+def load_settings(env_file: str | None = None, policy_file: str | None = None) -> Settings:
+    from .config_bundle import read_bundle
+    bundle = read_bundle(policy_file)
     values = env_values(env_file)
     mapping = {
         "base_url": ("OPENAI_BASE_URL", str), "api_key": ("OPENAI_API_KEY", str),
@@ -70,12 +79,13 @@ def load_settings(env_file: str | None = None) -> Settings:
         "thinking": ("LLM_THINKING", str),
         "send_max_tokens": ("LLM_SEND_MAX_TOKENS", parse_bool),
     }
-    result = Settings(**{k: cast(values[key]) for k, (key, cast) in mapping.items() if values.get(key) not in (None, "")})
+    result = Settings(**{**bundle["llm"], **{k: cast(values[key]) for k, (key, cast) in mapping.items() if values.get(key) not in (None, "")}})
     for stage in ("discover", "merge", "review", "extract"):
-        overrides = {}
+        overrides = dict(bundle["stages"].get(stage, {}))
         for attr, suffix, cast in (("context_tokens", "CONTEXT_TOKENS", int), ("max_output_tokens", "MAX_OUTPUT_TOKENS", int),
                                    ("timeout", "TIMEOUT_SECONDS", float), ("retries", "MAX_RETRIES", int), ("concurrency", "CONCURRENCY", int),
-                                   ("send_max_tokens", "SEND_MAX_TOKENS", parse_bool)):
+                                   ("send_max_tokens", "SEND_MAX_TOKENS", parse_bool),
+                                   ("temperature", "TEMPERATURE", float), ("json_mode", "JSON_MODE", str), ("thinking", "THINKING", str)):
             value = values.get(f"LLM_{stage.upper()}_{suffix}")
             if value not in (None, ""):
                 overrides[attr] = cast(value)
@@ -116,20 +126,22 @@ POLICY_ENV = {
     "recovery_max_depth": ("CO_RECOVERY_MAX_DEPTH", int),
     "review_batch_items": ("CO_REVIEW_BATCH_ITEMS", int), "review_max_rounds": ("CO_REVIEW_MAX_ROUNDS", int),
     "allow_unreviewed_schema": ("CO_ALLOW_UNREVIEWED_SCHEMA", parse_bool),
+    "discovery_strategy": ("CO_DISCOVERY_STRATEGY", str),
+    "review_max_requests": ("CO_REVIEW_MAX_REQUESTS", int),
+    "review_max_seconds": ("CO_REVIEW_MAX_SECONDS", int),
+    "review_max_tokens": ("CO_REVIEW_MAX_TOKENS", int),
 }
 
 
 def load_policy(path: str | None = None, env_file: str | None = None, frozen=False) -> dict:
     data = yaml.safe_load((RESOURCE / "default.yaml").read_text(encoding="utf-8"))
     if path:
-        supplied = yaml.safe_load(Path(path).read_text(encoding="utf-8")) or {}
+        from .config_bundle import read_bundle
+        supplied = read_bundle(path)["policy"]
         unknown = set(supplied) - set(data)
         if unknown:
             raise ValueError(f"Unknown configuration keys: {sorted(unknown)}")
         data.update(supplied)
-        for key in ("prompt_dir", "compile_commands"):
-            if data.get(key):
-                data[key] = str((Path(path).resolve().parent / data[key]).resolve())
     values = env_values(env_file)
     # Workbench jobs use an already resolved policy captured when submitted.
     if frozen or path and os.environ.get("CO_FROZEN_POLICY") == str(Path(path).resolve()):
@@ -150,7 +162,7 @@ def load_policy(path: str | None = None, env_file: str | None = None, frozen=Fal
     for key in ("pack_tokens", "graph_nodes_per_pack", "batch_packs", "merge_max_rounds", "merge_batch_items", "recovery_max_depth", "joern_timeout", "max_file_bytes", "review_batch_items", "review_max_rounds"):
         if not isinstance(data[key], int) or data[key] <= 0:
             raise ValueError(f"{key} must be a positive integer")
-    for key in ("neighbor_limit", "discovery_max_packs", "max_files"):
+    for key in ("neighbor_limit", "discovery_max_packs", "max_files", "review_max_requests", "review_max_seconds", "review_max_tokens"):
         if not isinstance(data[key], int) or data[key] < 0:
             raise ValueError(f"{key} must be nonnegative")
     for key in ("include", "exclude", "includes", "defines", "views", "profiles"):
@@ -161,6 +173,8 @@ def load_policy(path: str | None = None, env_file: str | None = None, frozen=Fal
             raise ValueError(f"Invalid {key}")
     if data["parser_backend"] not in {"auto", "joern", "tree-sitter"}:
         raise ValueError("parser_backend must be auto, joern or tree-sitter")
+    if data["discovery_strategy"] not in {"auto", "legacy", "budget"}:
+        raise ValueError("CO_DISCOVERY_STRATEGY must be auto/legacy/budget")
     return data
 
 
@@ -168,17 +182,20 @@ def configuration_sources(env_file=None, policy_file=None):
     """Names and origins only; never return values or secrets."""
     file = Path(env_file) if env_file else PROJECT / ".env"
     supplied = dotenv_values(file) if file.is_file() else {}
-    yaml_values = (yaml.safe_load(Path(policy_file).read_text(encoding="utf-8")) or {}) if policy_file else {}
+    from .config_bundle import read_bundle
+    bundle = read_bundle(policy_file)
+    yaml_values = bundle["policy"]
     def origin(key, fallback):
         if os.environ.get(key) not in (None, ""):
             return "system environment"
         if supplied.get(key) not in (None, ""):
             return str(file.resolve())
         return fallback
-    policy = {field: origin(key, str(Path(policy_file).resolve()) if field in yaml_values else "built-in default")
+    policy = {field: origin(key, bundle["sources"].get("policy." + field, "built-in default"))
               for field, (key, _) in POLICY_ENV.items()}
     if env_values(env_file).get("CO_DISCOVERY_MODE") == "full":
         policy["discovery_max_packs"] = origin("CO_DISCOVERY_MODE", "built-in default") + " (full)"
     model = {key: origin(key, "inherited global/default") for key in set(supplied) | set(os.environ)
              if key.startswith(("LLM_", "OPENAI_"))}
-    return {"policy": policy, "model": model}
+    return {"policy": policy, "model": model, "yaml": bundle["sources"],
+            "overrides": [key for key in policy if "policy." + key in bundle["sources"] and policy[key] != bundle["sources"]["policy." + key]]}

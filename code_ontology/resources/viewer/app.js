@@ -6,7 +6,7 @@ const pretty = value => JSON.stringify(value, null, 2);
 const labels = {entities:"实体",relations:"实体关系",attributes:"属性断言",rules:"代码规则",candidates:"候选项",conflicts:"属性冲突"};
 const schemaLabels = {classes:"概念",relations:"关系类型",properties:"属性类型"};
 const pageTitles = {graph:["从代码中看见业务结构","探索概念与关系，沿证据回到源码。"],records:["每一条知识，都有出处","逐项查看实例、属性与规则，保留候选和冲突供复核。"],compare:["比较实验，而非比较数量","并列查看同一源码快照下不同视图与提示词的结果。"],stages:["沿着产物追踪每个阶段","从源码快照到最终本体，查看阶段边界与处理范围。"],review:["让质量判断有据可查","查看人工评审记录，导出标签用于离线汇总。"]};
-const S = {runs:[],run:null,detail:null,page:"graph",layer:new URLSearchParams(location.search).get("layer")==="instances"?"instances":"schema",kind:"entities",offset:0,query:"",epoch:0,detailEpoch:0,review:{}};
+const S = {runs:[],run:null,detail:null,page:"graph",layer:new URLSearchParams(location.search).get("layer")==="instances"?"instances":"schema",kind:"entities",offset:0,query:"",epoch:0,detailEpoch:0,review:{},graphLayout:"horizontal",graphPositions:new Map()};
 try { S.review = JSON.parse(localStorage.getItem("code-atlas-reviews-v1") || "{}"); } catch (_) { S.review = {}; }
 function toast(text){ const node=$("#toast");node.textContent=text;node.hidden=false;clearTimeout(toast.timer);toast.timer=setTimeout(()=>node.hidden=true,5000); }
 async function api(name,args={}) { const r=await fetch(`/api/${name}?${new URLSearchParams(args)}`);const d=await r.json();if(!r.ok)throw Error(d.error || `HTTP ${r.status}`);return d; }
@@ -37,7 +37,7 @@ async function selectRun(id){
   $("#metrics").innerHTML=metric("业务概念",d.schema.classes.length,"固定 schema 中的类")+metric("关系类型",d.schema.relations.length,"概念间的关联定义")+metric("抽取实体",m.entities,"含代码 / 配置 / 示例范围")+metric("代码规则",m.rules,"条件与动作，待人工核验")+metric("候选 / 冲突",`${m.candidates ?? "—"} / ${m.conflicts ?? "—"}`,"保留歧义供后续复核")+metric("证据可定位率",m.evidence_locatable_rate==null?"—":`${Math.round(m.evidence_locatable_rate*100)}%`,"只表示引用可回查");
   await render();
 }
-async function render(){
+async function render(){detailHistory.length=0;updateBack();
   const epoch=++S.epoch;const titles=pageTitles[S.page];$("#page-title").textContent=titles[0];$("#page-subtitle").textContent=titles[1];
   $$(".nav").forEach(n=>n.classList.toggle("active",n.dataset.page===S.page));
   if(!S.detail)return;
@@ -51,7 +51,11 @@ function detailPanel(){return '<aside class="panel"><div class="panel-head"><div
 function shownSchema(){return S.snapshot||S.detail;}
 function schemaRecord(kind,row){const context=shownSchema();return {record_id:context.schema_record_ids[kind][row.id],payload:row,kind:"schema."+kind,schema:context.schema};}
 function reviewKey(record){return `${S.run.id}/${record.record_id}`;}
-function showDetail(record){
+const detailHistory=[],pageHistory=[];
+function updateBack(){$("#viewer-back").disabled=!detailHistory.length&&!pageHistory.length;}
+function rememberPage(){pageHistory.push({page:S.page,layer:S.layer,kind:S.kind,offset:S.offset,query:S.query,snapshot:S.snapshot,scroll:window.scrollY});updateBack();}
+async function navigatePage(page){if(page!==S.page)rememberPage();S.page=page;await render();}
+function showDetail(record){const previous=$("#detail-body");if(previous)detailHistory.push({nodes:[...previous.childNodes],className:previous.className,scroll:previous.scrollTop});updateBack();
   S.detailEpoch++;const target=$("#detail-body");if(!target)return;target.className="detail-body";
   const row=record.payload;const kind=record.kind;const schema=record.schema||S.detail.schema;const names=Object.fromEntries([...schema.classes,...schema.relations,...schema.properties].map(r=>[r.id,r.name]));
   const name=row.name||names[row.property_id]||names[row.relation_id]||row.reason||"条目详情";
@@ -71,7 +75,8 @@ function showDetail(record){
 async function showEvidence(eid){
   const epoch=++S.detailEpoch;const id=S.run.id;const d=await api("evidence",{id,evidence_id:eid});if(epoch!==S.detailEpoch||id!==S.run.id)return;
   const target=$("#evidence-source");if(!target)return;
-  target.innerHTML=`<div class="source-file">${esc(d.ref.file)} : ${d.ref.start_line}–${d.ref.end_line}<br>${d.source_hash_matches?"源码指纹与证据一致":"⚠ 源码指纹不一致，请重新校验"}${d.truncated?" · 当前仅展示部分内容":""}</div><div class="source">${d.lines.map(l=>`<div class="source-line${l.highlight?" highlight":""}"><span class="line-number">${l.number}</span><span>${esc(l.text)}</span></div>`).join("")}</div>`;
+  target.innerHTML=`<button class="button" id="close-evidence">返回条目</button><div class="source-file">${esc(d.ref.file)} : ${d.ref.start_line}–${d.ref.end_line}<br>${d.source_hash_matches?"源码指纹与证据一致":"⚠ 源码指纹不一致，请重新校验"}${d.truncated?" · 当前仅展示部分内容":""}</div><div class="source">${d.lines.map(l=>`<div class="source-line${l.highlight?" highlight":""}"><span class="line-number">${l.number}</span><span>${esc(l.text)}</span></div>`).join("")}</div>`;
+  $("#close-evidence").onclick=()=>{S.detailEpoch++;target.replaceChildren();};
 }
 function reviewForm(record){
   const old=S.review[reviewKey(record)]||{};const target=$("#review-form");
@@ -85,8 +90,8 @@ function reviewForm(record){
 }
 async function graphPage(epoch){
   document.title=`${S.layer==="schema"?"Schema":"Instances"} · ${S.run.experiment} · Code Atlas`;
-  $("#page-content").innerHTML=`<div class="graph-grid"><section class="panel"><div class="panel-head"><div><h2>${S.layer==="schema"?"本体结构 · Schema":"实例关系 · Instances"}</h2><small>结构视图与实例视图分别展示，点击条目追溯证据</small></div><button class="button" id="export-svg">导出 SVG</button></div><div class="toolbar"><button class="button ${S.layer==="schema"?'selected':''}" id="schema-layer">本体结构</button><button class="button ${S.layer==="instances"?'selected':''}" id="instance-layer">抽取实例</button><input id="graph-search" aria-label="搜索图谱" placeholder="搜索名称或定义"><button class="button" id="graph-find">筛选</button><button class="button" id="graph-reset">复位</button></div><div class="graph-wrap" id="graph-host"></div><div class="legend"><span><i></i>${S.layer==="schema"?"业务概念":"实体"}</span><span><i class="blue"></i>${S.layer==="schema"?"层级 / 业务关系":"实例关系"}</span><span>滚轮缩放 · 拖动平移</span></div><div class="graph-note" id="graph-note"></div></section>${detailPanel()}</div>`;
-  $("#schema-layer").onclick=()=>{S.layer="schema";render().catch(failure);};$("#instance-layer").onclick=()=>{S.layer="instances";render().catch(failure);};
+  $("#page-content").innerHTML=`<div class="graph-grid"><section class="panel"><div class="panel-head"><div><h2>${S.layer==="schema"?"本体结构 · Schema":"实例关系 · Instances"}</h2><small>结构视图与实例视图分别展示，点击条目追溯证据</small></div><button class="button" id="export-svg">导出 SVG</button></div><div class="toolbar"><button class="button ${S.layer==="schema"?'selected':''}" id="schema-layer">本体结构</button><button class="button ${S.layer==="instances"?'selected':''}" id="instance-layer">抽取实例</button><input id="graph-search" aria-label="搜索图谱" placeholder="搜索名称或定义"><button class="button" id="graph-find">筛选</button><label for="graph-layout">布局<select id="graph-layout" aria-label="图谱布局"><option value="horizontal">横向连接</option><option value="vertical">纵向连接</option><option value="grid">网格布局</option></select></label><button class="button" id="graph-fit">适应画布</button><button class="button" id="graph-reset">复位</button></div><div class="graph-wrap" id="graph-host"></div><div class="legend"><span><i></i>${S.layer==="schema"?"业务概念":"实体"}</span><span><i class="blue"></i>${S.layer==="schema"?"层级 / 业务关系":"实例关系"}</span><span>拖拽节点调整位置 · 拖动空白平移 · 滚轮缩放</span></div><div class="graph-note" id="graph-note"></div></section>${detailPanel()}</div>`;
+  $("#schema-layer").onclick=()=>{rememberPage();S.layer="schema";render().catch(failure);};$("#instance-layer").onclick=()=>{rememberPage();S.layer="instances";render().catch(failure);};
   if(S.layer==="schema"){
     const bar=document.createElement("div");bar.className="toolbar";
     const label=document.createElement("label");label.textContent="Schema 版本";label.htmlFor="schema-version";
@@ -101,6 +106,7 @@ async function graphPage(epoch){
     const [a,b]=await Promise.all([api("records",{id:S.run.id,kind:"entities",limit:1000}),api("records",{id:S.run.id,kind:"relations",limit:1000})]);
     if(epoch!==S.epoch)return;entities=a.rows;relations=b.rows;instanceTotal=a.total;relationTotal=b.total;
   }
+  $("#graph-layout").value=S.graphLayout;
   function draw(){
     const query=$("#graph-search").value.toLocaleLowerCase();let nodes=[],edges=[],total=0;
     if(S.layer==="schema"){
@@ -117,26 +123,99 @@ async function graphPage(epoch){
     $("#graph-note").textContent=`当前展示 ${nodes.length}/${total} 个节点、${edges.length} 条边。图中最多显示 80 个节点、160 条边${omitted}，筛选仅作用于已加载节点；实例输入最多加载前 1000 个实体。完整结果请在「知识断言」中检索。属性定义在概念详情中查看。`;
     drawGraph(nodes,edges);
   }
-  $("#graph-find").onclick=draw;$("#graph-search").onkeydown=e=>{if(e.key==="Enter")draw();};$("#graph-reset").onclick=()=>{$("#graph-search").value="";draw();};
+  $("#graph-find").onclick=draw;$("#graph-search").onkeydown=e=>{if(e.key==="Enter")draw();};$("#graph-reset").onclick=()=>{$("#graph-search").value="";S.graphPositions.delete(graphPositionKey());draw();};
+  $("#graph-layout").onchange=e=>{S.graphLayout=e.target.value;draw();};
+  $("#graph-fit").onclick=()=>$("#graph-host svg")?.fitGraph();
   $("#export-svg").onclick=()=>{const svg=$("#graph-host svg");if(svg)download(`ontology-${S.layer}.svg`,new XMLSerializer().serializeToString(svg),"image/svg+xml");};draw();
+}
+function graphPositionKey(){return JSON.stringify([S.run.id,S.layer,S.snapshot?.path||"current",S.graphLayout]);}
+function graphLayout(nodes,edges,direction){
+  const positions=new Map();
+  if(direction==="grid"){
+    const cols=Math.max(1,Math.ceil(Math.sqrt(nodes.length*1.5)));
+    nodes.forEach((n,i)=>positions.set(n.id,{x:100+i%cols*220,y:85+Math.floor(i/cols)*135}));
+    return positions;
+  }
+  // Collapse strongly connected components so cycles cannot inflate the ranks.
+  const adjacent=new Map(nodes.map(n=>[n.id,[]]));
+  edges.forEach(e=>adjacent.get(e.from).push(e.to));
+  const indices=new Map(),low=new Map(),stack=[],active=new Set(),components=[],component=new Map();let index=0;
+  function visit(id){
+    indices.set(id,index);low.set(id,index++);stack.push(id);active.add(id);
+    for(const next of adjacent.get(id)){
+      if(!indices.has(next)){visit(next);low.set(id,Math.min(low.get(id),low.get(next)));}
+      else if(active.has(next))low.set(id,Math.min(low.get(id),indices.get(next)));
+    }
+    if(low.get(id)===indices.get(id)){
+      const group=[];let next;
+      do{next=stack.pop();active.delete(next);component.set(next,components.length);group.push(next);}while(next!==id);
+      components.push(group);
+    }
+  }
+  nodes.forEach(n=>{if(!indices.has(n.id))visit(n.id);});
+  const outgoing=components.map(()=>new Set()),degree=components.map(()=>0),ranks=components.map(()=>0);
+  for(const e of edges){const a=component.get(e.from),b=component.get(e.to);if(a!==b&&!outgoing[a].has(b)){outgoing[a].add(b);degree[b]++;}}
+  const queue=degree.flatMap((d,i)=>d===0?[i]:[]);
+  for(let i=0;i<queue.length;i++)for(const next of outgoing[queue[i]]){ranks[next]=Math.max(ranks[next],ranks[queue[i]]+1);if(--degree[next]===0)queue.push(next);}
+  const slots=new Map();
+  for(const n of nodes){const rank=ranks[component.get(n.id)],slot=slots.get(rank)||0;slots.set(rank,slot+1);
+    positions.set(n.id,direction==="vertical"?{x:100+slot*220,y:85+rank*155}:{x:100+rank*270,y:85+slot*120});
+  }
+  return positions;
 }
 function drawGraph(nodes,edges){
   const host=$("#graph-host");host.replaceChildren();if(!nodes.length){host.innerHTML='<div class="empty">当前筛选没有可展示的节点。</div>';return;}
   const NS="http://www.w3.org/2000/svg";const make=(tag,attrs={},text)=>{const el=document.createElementNS(NS,tag);Object.entries(attrs).forEach(([k,v])=>el.setAttribute(k,v));if(text!==undefined)el.textContent=text;return el;};
-  const cols=Math.max(2,Math.ceil(Math.sqrt(nodes.length*1.5))),width=Math.max(900,cols*210),height=Math.max(570,Math.ceil(nodes.length/cols)*145+110);
-  const svg=make("svg",{viewBox:`0 0 ${width} ${height}`,role:"img","aria-label":"业务本体关系图",xmlns:NS});
+  const positions=graphLayout(nodes,edges,S.graphLayout),key=graphPositionKey();
+  const saved=S.graphPositions.get(key)||new Map();S.graphPositions.set(key,saved);
+  for(const n of nodes){if(saved.has(n.id))positions.set(n.id,{...saved.get(n.id)});}
+  const svg=make("svg",{role:"img","aria-label":"业务本体关系图",xmlns:NS});
   svg.append(make("title",{},`${S.run.experiment} · ${S.layer} · 当前筛选子图，${nodes.length} 节点 / ${edges.length} 边`));
   const defs=make("defs"),marker=make("marker",{id:"arrow",viewBox:"0 0 10 10",refX:9,refY:5,markerWidth:6,markerHeight:6,orient:"auto-start-reverse"});marker.append(make("path",{d:"M 0 0 L 10 5 L 0 10 z",fill:"#7b9f98"}));defs.append(marker);svg.append(defs);
-  const positions=new Map();nodes.forEach((n,i)=>positions.set(n.id,{x:100+(i%cols)*(width-200)/Math.max(cols-1,1),y:80+Math.floor(i/cols)*145}));
-  const lanes=new Map();for(const e of edges){const a=positions.get(e.from),b=positions.get(e.to);const key=[e.from,e.to].sort().join("/");const lane=lanes.get(key)||0;lanes.set(key,lane+1);let d,tx,ty;
-    if(e.from===e.to){d=`M ${a.x-45} ${a.y-15} C ${a.x-100} ${a.y-100}, ${a.x+100} ${a.y-100}, ${a.x+45} ${a.y-15}`;tx=a.x;ty=a.y-67;}else{const bend=(lane%2===0?1:-1)*(18+Math.floor(lane/2)*19);const midX=(a.x+b.x)/2,midY=(a.y+b.y)/2;const length=Math.hypot(b.x-a.x,b.y-a.y)||1;const px=-(b.y-a.y)/length,py=(b.x-a.x)/length;const endX=b.x-(b.x-a.x)/length*67,endY=b.y-(b.y-a.y)/length*29;d=`M ${a.x} ${a.y} Q ${midX+px*bend} ${midY+py*bend} ${endX} ${endY}`;tx=midX+px*bend/2;ty=midY+py*bend/2-5;}
-    const g=make("g",{class:"graph-edge",tabindex:0,role:"button","aria-label":e.label});g.append(make("path",{d,fill:"none",stroke:e.inheritance?"#acc0cf":"#91b3aa","stroke-width":1.2,"stroke-dasharray":e.inheritance?"5 4":"none","marker-end":"url(#arrow)"}));g.append(make("text",{x:tx,y:ty,"text-anchor":"middle","font-family":"Segoe UI, Microsoft YaHei, sans-serif","font-size":10,fill:"#64827a",stroke:"#fbfcfb","stroke-width":4,"paint-order":"stroke"},e.label.length>12?e.label.slice(0,12)+"…":e.label));g.append(make("title",{},e.label));g.onclick=()=>showDetail(e.record);g.onkeydown=ev=>{if(ev.key==="Enter")showDetail(e.record);};svg.append(g);
+  const lanes=new Map(),edgeViews=[];
+  for(const e of edges){
+    const pair=JSON.stringify([e.from,e.to].sort()),lane=lanes.get(pair)||0;lanes.set(pair,lane+1);
+    const g=make("g",{class:"graph-edge",tabindex:0,role:"button","aria-label":e.label});
+    const path=make("path",{fill:"none",stroke:e.inheritance?"#acc0cf":"#91b3aa","stroke-width":1.2,"stroke-dasharray":e.inheritance?"5 4":"none","marker-end":"url(#arrow)"});
+    const text=make("text",{"text-anchor":"middle","font-family":"Segoe UI, Microsoft YaHei, sans-serif","font-size":10,fill:"#64827a",stroke:"#fbfcfb","stroke-width":4,"paint-order":"stroke"},e.label.length>12?e.label.slice(0,12)+"…":e.label);
+    g.append(path,text,make("title",{},e.label));g.onclick=()=>showDetail(e.record);g.onkeydown=ev=>{if(ev.key==="Enter")showDetail(e.record);};svg.append(g);edgeViews.push({edge:e,lane,path,text});
   }
-  for(const n of nodes){const p=positions.get(n.id);const g=make("g",{transform:`translate(${p.x},${p.y})`,class:"graph-node",tabindex:0,role:"button","aria-label":n.label});g.append(make("rect",{x:-73,y:-27,width:146,height:54,rx:9,fill:S.layer==="schema"?"#e9f4ed":"#edf3f8",stroke:S.layer==="schema"?"#86b7a0":"#94b2c6","stroke-width":1}));g.append(make("text",{x:0,y:-3,"text-anchor":"middle","font-family":"Segoe UI, Microsoft YaHei, sans-serif","font-size":12,fill:"#254f41"},n.label.length>13?n.label.slice(0,13)+"…":n.label));g.append(make("text",{x:0,y:15,"text-anchor":"middle","font-family":"Segoe UI, Microsoft YaHei, sans-serif","font-size":9,fill:"#7c9588"},n.sub));g.append(make("title",{},n.label));g.onclick=()=>showDetail(n.record);g.onkeydown=e=>{if(e.key==="Enter")showDetail(n.record);};svg.append(g);}
-  let view={x:0,y:0,w:width,h:height},drag=null;
+  function updateEdges(){for(const {edge:e,lane,path,text} of edgeViews){
+    const a=positions.get(e.from),b=positions.get(e.to);let d,tx,ty;
+    if(e.from===e.to){d=`M ${a.x-45} ${a.y-15} C ${a.x-120} ${a.y-115}, ${a.x+120} ${a.y-115}, ${a.x+45} ${a.y-15}`;tx=a.x;ty=a.y-85;}
+    else{
+      const dx=b.x-a.x,dy=b.y-a.y,length=Math.hypot(dx,dy)||1;
+      const bend=(lane%2===0?1:-1)*(18+Math.floor(lane/2)*22),cx=(a.x+b.x)/2-dy/length*bend,cy=(a.y+b.y)/2+dx/length*bend;
+      // Clip each end to the node rectangle along its curve tangent.
+      const boundary=(p,q)=>{const x=q.x-p.x,y=q.y-p.y,t=1/Math.max(Math.abs(x)/75,Math.abs(y)/29,1);return {x:p.x+x*t,y:p.y+y*t};};
+      const start=boundary(a,{x:cx,y:cy}),end=boundary(b,{x:cx,y:cy});
+      d=`M ${start.x} ${start.y} Q ${cx} ${cy} ${end.x} ${end.y}`;tx=(a.x+2*cx+b.x)/4;ty=(a.y+2*cy+b.y)/4-6;
+    }
+    path.setAttribute("d",d);text.setAttribute("x",tx);text.setAttribute("y",ty);
+  }}
+  const nodeViews=new Map();let drag=null;
+  for(const n of nodes){const p=positions.get(n.id);const g=make("g",{transform:`translate(${p.x},${p.y})`,class:"graph-node","data-node-id":n.id,tabindex:0,role:"button","aria-label":n.label});g.append(make("rect",{x:-73,y:-27,width:146,height:54,rx:9,fill:S.layer==="schema"?"#e9f4ed":"#edf3f8",stroke:S.layer==="schema"?"#86b7a0":"#94b2c6","stroke-width":1}));g.append(make("text",{x:0,y:-3,"text-anchor":"middle","font-family":"Segoe UI, Microsoft YaHei, sans-serif","font-size":12,fill:"#254f41"},n.label.length>13?n.label.slice(0,13)+"…":n.label));g.append(make("text",{x:0,y:15,"text-anchor":"middle","font-family":"Segoe UI, Microsoft YaHei, sans-serif","font-size":9,fill:"#7c9588"},n.sub));g.append(make("title",{},n.label));g.onkeydown=e=>{if(e.key==="Enter")showDetail(n.record);};svg.append(g);nodeViews.set(n.id,g);}
+  updateEdges();host.append(svg);
+  let view={x:0,y:0,w:900,h:570};
   const apply=()=>svg.setAttribute("viewBox",`${view.x} ${view.y} ${view.w} ${view.h}`);
-  svg.addEventListener("wheel",e=>{e.preventDefault();const scale=e.deltaY>0?1.12:.89;if(view.w*scale<200||view.w*scale>width*5)return;const box=svg.getBoundingClientRect();const x=(e.clientX-box.left)/box.width,y=(e.clientY-box.top)/box.height;view.x+=view.w*x*(1-scale);view.y+=view.h*y*(1-scale);view.w*=scale;view.h*=scale;apply();},{passive:false});
-  svg.onpointerdown=e=>{if(e.target.closest(".graph-node,.graph-edge"))return;drag={x:e.clientX,y:e.clientY,v:{...view}};svg.setPointerCapture(e.pointerId);};svg.onpointermove=e=>{if(!drag)return;const b=svg.getBoundingClientRect();view.x=drag.v.x-(e.clientX-drag.x)*view.w/b.width;view.y=drag.v.y-(e.clientY-drag.y)*view.h/b.height;apply();};svg.onpointerup=()=>drag=null;svg.onpointercancel=()=>drag=null;host.append(svg);
+  const point=e=>{const p=svg.createSVGPoint();p.x=e.clientX;p.y=e.clientY;return p.matrixTransform(svg.getScreenCTM().inverse());};
+  svg.fitGraph=()=>{const box=svg.getBBox();view={x:box.x-55,y:box.y-55,w:Math.max(240,box.width+110),h:Math.max(180,box.height+110)};apply();};svg.fitGraph();
+  svg.addEventListener("wheel",e=>{e.preventDefault();if(drag)return;const scale=e.deltaY>0?1.12:1/1.12;if(view.w*scale<120||view.w*scale>100000)return;const p=point(e);view.x=p.x+(view.x-p.x)*scale;view.y=p.y+(view.y-p.y)*scale;view.w*=scale;view.h*=scale;apply();},{passive:false});
+  svg.onpointerdown=e=>{
+    if(e.button!==0||drag)return;const node=e.target.closest(".graph-node");if(!node&&e.target.closest(".graph-edge"))return;
+    const p=point(e),id=node?.getAttribute("data-node-id");
+    drag={pointer:e.pointerId,id,start:p,clientX:e.clientX,clientY:e.clientY,position:id?{...positions.get(id)}:null,view:{...view},moved:false};
+    if(node)node.classList.add("dragging");svg.setPointerCapture(e.pointerId);e.preventDefault();
+  };
+  svg.onpointermove=e=>{
+    if(!drag||e.pointerId!==drag.pointer)return;
+    if(!drag.moved&&Math.hypot(e.clientX-drag.clientX,e.clientY-drag.clientY)<4)return;drag.moved=true;
+    const p=point(e);
+    if(drag.id){const position={x:drag.position.x+p.x-drag.start.x,y:drag.position.y+p.y-drag.start.y};positions.set(drag.id,position);saved.set(drag.id,{...position});nodeViews.get(drag.id).setAttribute("transform",`translate(${position.x},${position.y})`);updateEdges();}
+    else{view.x+=drag.start.x-p.x;view.y+=drag.start.y-p.y;apply();}
+  };
+  const stop=e=>{if(!drag||e.pointerId!==drag.pointer)return;const selected=drag.id&&!drag.moved&&e.type==="pointerup"?nodes.find(n=>n.id===drag.id):null;if(drag.id)nodeViews.get(drag.id).classList.remove("dragging");drag=null;if(selected)showDetail(selected.record);};
+  svg.onpointerup=stop;svg.onpointercancel=stop;svg.onlostpointercapture=stop;
 }
 function summaryRow(row,kind){
   const names=Object.fromEntries([...S.detail.schema.classes,...S.detail.schema.relations,...S.detail.schema.properties].map(c=>[c.id,c.name]));
@@ -177,4 +256,8 @@ function reviewPage(){
   $$('[data-review-row]').forEach(b=>b.onclick=()=>{$("#review-inspect").innerHTML=detailPanel();showDetail(records[Number(b.dataset.reviewRow)]);});
 }
 $("#refresh").onclick=()=>refresh().catch(failure);$("#run-select").onchange=e=>selectRun(e.target.value).catch(failure);
-$$('.nav').forEach(n=>n.onclick=()=>{S.page=n.dataset.page;render().catch(failure);});refresh().catch(e=>{$("#page-content").innerHTML=`<div class="panel empty error">${esc(e.message)}<br>请检查终端服务状态，然后刷新产物。</div>`;failure(e);});
+$$('.nav').forEach(n=>n.onclick=()=>{navigatePage(n.dataset.page).catch(failure);});refresh().catch(e=>{$("#page-content").innerHTML=`<div class="panel empty error">${esc(e.message)}<br>请检查终端服务状态，然后刷新产物。</div>`;failure(e);});
+
+$("#viewer-back").onclick=()=>{if(detailHistory.length){S.detailEpoch++;const item=detailHistory.pop(),target=$("#detail-body");if(target){target.replaceChildren(...item.nodes);target.className=item.className;target.scrollTop=item.scroll;}updateBack();return;}const item=pageHistory.pop();if(item){Object.assign(S,item);render().then(()=>window.scrollTo(0,item.scroll)).catch(failure);}updateBack();};
+const embedded=new URLSearchParams(location.search).get('embedded')==='1';
+if(embedded){document.body.classList.add('embedded');$("#return-workbench").hidden=false;$("#return-workbench").onclick=()=>{if(window.parent!==window)window.parent.postMessage({type:'code-atlas-return'},location.origin);};}

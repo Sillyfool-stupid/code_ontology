@@ -1,0 +1,5 @@
+policy:
+  discovery_strategy: budget
+  batch_packs: 8
+llm:
+  concurrency: 2

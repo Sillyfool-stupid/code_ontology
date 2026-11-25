@@ -12,6 +12,8 @@ from .schema_history import SchemaHistory, split_location
 from .schema_merge import (MERGE_FORMAT, MergeResponse, canonical_merge, coalesce, compose,
                            final_mapping, initial_candidates, merge_payload, validate_merge, alignment_findings, retain_missing_sources)
 from .util import canonical, digest, now, read_json, unique, write_json, write_jsonl
+from .events import emit
+from .discovery import payload as discovery_payload, batches as discovery_batches
 
 
 class IncompleteStage(RuntimeError):
@@ -24,12 +26,18 @@ class SchemaStages:
         self.stage = stage
         self.settings = pipeline.settings.for_stage(stage)
         self.llm = LLM(self.settings, pipeline.dest / "cache" / "llm")
+        self.llm.wait_messages = stage != "discover"
         from .pipeline import prompt
         self.system = prompt(pipeline.policy, pipeline.profile, stage)
         self.root = pipeline.output / "schema"
         self.errors = []
         self.history = None
         self.history_location = None
+        previous = self.root / "local-manifest.json"
+        previous = read_json(previous) if previous.is_file() else {}
+        configured = pipeline.policy.get("discovery_strategy", "auto")
+        self.strategy = (previous.get("strategy", "legacy") if previous else "budget") if configured == "auto" else configured
+        self.legacy_local = None
 
     def close(self):
         self.p.stage_stats.append(dict(self.llm.stats))
@@ -37,7 +45,7 @@ class SchemaStages:
 
     def signature(self, payload):
         contract = MergeResponse if self.stage == "merge" else Ontology
-        return digest({"input": payload, "prompt": self.system, "settings": self.settings.public(),
+        return digest({"input": payload, "prompt": self.system, "settings": self.settings.request_identity() if self.stage == "discover" else self.settings.public(),
                        "contract": contract.model_json_schema(), "format": MERGE_FORMAT if self.stage == "merge" else 1}, 40)
 
     def call(self, payload):
@@ -45,6 +53,26 @@ class SchemaStages:
         from .pipeline import evidence_check, canonical_schema
         key = self.signature(payload)
         path = self.root / ("local" if self.stage == "discover" else "merge") / f"{key}.json"
+        if self.stage == "discover" and not path.is_file():
+            if self.legacy_local is None:
+                self.legacy_local = []
+                for old in (self.root / "local").glob("*.json"):
+                    if old.name.endswith((".task.json", ".candidate.json")):
+                        continue
+                    saved = read_json(old)
+                    if "settings" in saved and "schema" in saved:
+                        self.legacy_local.append((old, saved))
+            for old, saved in self.legacy_local:
+                from .config import Settings
+                if Settings(**saved["settings"]).request_identity() != self.settings.request_identity():
+                    continue
+                expected = digest({"input": payload, "prompt": self.system, "settings": saved["settings"],
+                                   "contract": Ontology.model_json_schema(), "format": 1}, 40)
+                if old.stem == saved.get("key") == expected:
+                    value = Ontology.model_validate(saved["schema"])
+                    evidence_check(value, {e for p in payload["packs"] for e in p["evidence_ids"]})
+                    write_json(path, {**saved, "key": key, "reused_from": old.name})
+                    break
         if path.is_file():
             saved = read_json(path)
             if saved.get("key") == key:
@@ -53,6 +81,10 @@ class SchemaStages:
                     validate_merge(value, payload, compatibility=False)
                 else:
                     value = Ontology.model_validate(saved["schema"])
+                    evidence_check(value, {e for p in payload["packs"] for e in p["evidence_ids"]})
+                with self.llm.lock:
+                    self.llm.stats["cache_hits"] += 1
+                emit("cache_hit", stage=self.stage, task_id=key, message="复用阶段检查点")
                 return value
         task_path = path.with_suffix(".task.json")
         if task_path.is_file() and read_json(task_path).get("state") == "needs_split":
@@ -97,7 +129,7 @@ class SchemaStages:
     def recover(self, packs, depth=0):
         """Split a truncated local request. A fragment retains its original evidence anchor."""
         try:
-            return [self.call({"stage": "discover", "profile": self.p.profile, "packs": packs})]
+            return [self.call(discovery_payload(packs, self.p.profile, self.strategy == "budget"))]
         except BudgetError:
             if depth >= self.p.policy["recovery_max_depth"]:
                 raise
@@ -117,6 +149,7 @@ class SchemaStages:
                             "parse_warnings": original.get("parse_warnings", []) + ["recovery fragment; evidence anchors full original range"]}]
                           for i, fragment in enumerate((code[:cut], code[cut:]))]
             print(f"SPLIT discover depth={depth} children={len(groups)}", flush=True)
+            emit("task_split", stage="discover", depth=depth, children=len(groups), message="预算或截断触发拆分")
             results, failures = [], []
             for group in groups:
                 try:
@@ -139,19 +172,20 @@ class SchemaStages:
                    "unselected": [p["pack_id"] for p in self.p.packs if p["pack_id"] not in chosen]})
         size = self.p.policy["batch_packs"]
         # Group by module to keep local inputs related. Input overflows enter the same split path.
-        ordered = sorted(selected, key=lambda p: (str(Path(p["source_refs"][0]["file"]).parent), p["pack_id"]))
-        module_packs = defaultdict(list)
-        for pack in ordered:
-            module_packs[str(Path(pack["source_refs"][0]["file"]).parent)].append(pack)
-        batches = [rows[i:i+size] for rows in module_packs.values() for i in range(0, len(rows), size)]
+        batches = discovery_batches(selected, size, self.system, self.llm, self.p.profile, self.strategy == "budget")
         fingerprint = digest({"packs": self.p.packs, "selected": sorted(chosen), "prompt": self.system,
-                              "settings": self.settings.public(), "batch_size": size,
+                              "settings": self.settings.request_identity(), "batch_size": size,
+                              "strategy": self.strategy, "protocol": 2,
                               "recovery_depth": self.p.policy["recovery_max_depth"]}, 40)
+        write_json(self.root / "local-tasks.json", {"key": fingerprint, "strategy": self.strategy,
+                   "batches": [[p["pack_id"] for p in batch] for batch in batches]})
         write_json(self.root / "local-manifest.json", {"state": "running", "key": fingerprint,
-                   "selected": sorted(chosen), "started_at": now()})
+                   "selected": sorted(chosen), "strategy": self.strategy, "protocol": 2, "started_at": now()})
         write_json(self.root / "merge-status.json", {"state": "stale", "reason": "local discovery started", "updated_at": now()})
         self.p.save_state("discover-local", "running", tasks=len(batches))
         values, module_results, completed, started = [], defaultdict(list), 0, time.monotonic()
+        emit("progress", stage="discover", completed=0, total=len(batches), successful=0, failed=0, unknown=0,
+             message="局部 Schema 批次已冻结；进度单位为初始批次")
         with ThreadPoolExecutor(max_workers=self.settings.concurrency) as pool:
             iterator = iter(batches)
             pending = {}
@@ -164,8 +198,6 @@ class SchemaStages:
             refill()
             while pending:
                 done, _ = wait(pending, timeout=15, return_when=FIRST_COMPLETED)
-                if not done:
-                    print(f"WAIT discover {completed}/{len(batches)} elapsed={time.monotonic()-started:.0f}s logs={self.p.output / 'llm_requests'}", flush=True)
                 for future in done:
                     batch = pending.pop(future)
                     try:
@@ -180,15 +212,20 @@ class SchemaStages:
                         self.errors.append({"state": "failed", "packs": [p["pack_id"] for p in batch], "error": self.llm.safe_error(exc)})
                     completed += 1
                     print(f"TASK discover {completed}/{len(batches)} ({completed-len(self.errors)} successful)", flush=True)
+                    emit("progress", stage="discover", completed=completed, total=len(batches),
+                         successful=completed-len(self.errors), failed=sum(e["state"] == "failed" for e in self.errors),
+                         unknown=sum(e["state"] == "unknown" for e in self.errors), remaining=len(batches)-completed,
+                         elapsed_seconds=round(time.monotonic()-started, 3), message="局部批次处理结束")
                 refill()
         # Deterministic order is essential for stable merge checkpoints across retries.
         schemas = sorted(unique([s.model_dump() for s in values]), key=canonical)
         manifest = {"state": "partial" if self.errors else "success", "key": fingerprint,
                     "packs_hash": digest(self.p.packs), "prompt_hash": digest(self.system),
-                    "settings": self.settings.public(), "batch_size": size,
+                    "settings": self.settings.public(), "batch_size": size, "strategy": self.strategy, "protocol": 2,
                     "recovery_depth": self.p.policy["recovery_max_depth"], "selected": sorted(chosen),
                     "schemas": schemas, "modules": {k: sorted(unique(v), key=canonical) for k,v in sorted(module_results.items())},
-                    "errors": self.errors, "ended_at": now()}
+                    "errors": self.errors, "ended_at": now(), "elapsed_seconds": round(time.monotonic()-started, 3),
+                    "performance": dict(self.llm.stats)}
         write_json(self.root / "local-manifest.json", manifest)
         self.p.save_state("discover-local", manifest["state"], tasks=len(batches), failures=len(self.errors))
         if self.errors or not schemas:
@@ -202,14 +239,23 @@ class SchemaStages:
             raise IncompleteStage("Run discover-local first")
         local = read_json(path)
         selected = {p["pack_id"] for p in self.p.packs}
-        expected = digest({"packs": self.p.packs, "selected": local["selected"],
+        from .config import Settings
+        saved_settings = Settings(**local["settings"])
+        current_settings = self.p.settings.for_stage("discover")
+        identity = {"packs": self.p.packs, "selected": local["selected"],
                            "prompt": prompt(self.p.policy, self.p.profile, "discover"),
-                           "settings": self.p.settings.for_stage("discover").public(),
+                           "settings": saved_settings.public(),
                            "batch_size": self.p.policy["batch_packs"],
-                           "recovery_depth": self.p.policy["recovery_max_depth"]}, 40)
+                           "recovery_depth": self.p.policy["recovery_max_depth"]}
+        if local.get("protocol") == 2:
+            identity.update(settings=saved_settings.request_identity(), strategy=local["strategy"], protocol=2)
+        expected = digest(identity, 40)
+        strategy = self.p.policy.get("discovery_strategy", "auto")
         from .pipeline import selected_packs
         current_selection = sorted(p["pack_id"] for p in selected_packs(self.p.packs, self.p.policy["discovery_max_packs"]))
-        if local["state"] != "success" or local["key"] != expected or local["selected"] != current_selection or not set(local["selected"]) <= selected:
+        if (local["state"] != "success" or local["key"] != expected or local["selected"] != current_selection
+                or not set(local["selected"]) <= selected or saved_settings.request_identity() != current_settings.request_identity()
+                or strategy != "auto" and strategy != local.get("strategy", "legacy")):
             raise IncompleteStage("Local inputs/configuration changed or incomplete; run discover-local first")
         return local
 
@@ -255,7 +301,9 @@ class SchemaStages:
                                 merge_batch(batch[cut:], split_location(location, 2), depth + 1))
                 for i, batch in enumerate(batches):
                     print(f"MERGE round={round_number+1} batch={i+1}/{len(batches)} items={len(batch)} started={now()}", flush=True)
+                    emit("progress", stage="merge", round=round_number+1, completed=i, total=len(batches), message="合并批次开始")
                     merged += merge_batch(batch, f"round-{round_number+1:03d}/batch-{i+1:03d}")
+                    emit("progress", stage="merge", round=round_number+1, completed=i+1, total=len(batches), successful=i+1, message="合并批次完成")
                     write_json(self.root / "merge-status.json", {"state": "running", "round": round_number+1,
                                "completed": i+1, "total": len(batches), "local_key": local["key"], "updated_at": now()})
                 merged = coalesce(merged)
@@ -291,7 +339,7 @@ class SchemaStages:
                                "alignment_issues": len(findings), "local_key": local["key"], "history": str(self.history.root), "ended_at": now()})
                     self.history.snapshot("final", [value.model_dump()], mapping=audit, alignment_issues=findings)
                     self.history.finish("success", quality_state="pending_ai_review")
-                    print(f"SCHEMA={self.root / 'schema.json'} alignment_issues={len(findings)} review=pending; Next: intranet review-schema", flush=True)
+                    print(f"SCHEMA={self.root / 'schema.json'} alignment_issues={len(findings)} review=pending; Next: intranet extract (optional: intranet review-schema)", flush=True)
                     self.p.save_state("merge-schema", "success", schema_hash=digest(value.model_dump()))
                     self.p.save_state("discover", "success", schema_hash=digest(value.model_dump()))
                     return value

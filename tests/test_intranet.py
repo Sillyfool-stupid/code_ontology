@@ -210,6 +210,7 @@ class IntranetTests(unittest.TestCase):
                 self.assertEqual(main(["extract", "--env-file", str(self.env)]), 1)
                 self.assertEqual(state["requests"], 0)
                 self.assertEqual(main(["run", "--env-file", str(self.env)]), 0)
+                self.assertEqual(state["stage_counts"].get("review", 0), 0)
                 before = state["requests"]
                 self.assertEqual(main(["merge-schema", "--env-file", str(self.env)]), 0)
                 self.assertEqual(state["requests"], before)
@@ -310,11 +311,17 @@ class IntranetTests(unittest.TestCase):
                 self.assertTrue((root / "schema.json").is_file())
                 self.assertGreater(read_json(root / "merge-status.json")["alignment_issues"], 0)
                 from code_ontology.schema_review import check_schema_use
-                with self.assertRaisesRegex(ValueError, "review-schema"):
-                    check_schema_use(pipeline)
-                pipeline.policy["allow_unreviewed_schema"] = True
-                self.assertEqual(check_schema_use(pipeline), "explicit_unreviewed_override")
                 pipeline.policy["allow_unreviewed_schema"] = False
+                self.assertEqual(check_schema_use(pipeline), "merged_unreviewed")
+                original = read_json(root / "schema.json")
+                changed = read_json(root / "schema.json")
+                changed["classes"][0]["name"] = "Unexpected edit"
+                write_json(root / "schema.json", changed)
+                with self.assertRaisesRegex(ValueError, "differs from merged draft"):
+                    check_schema_use(pipeline)
+                write_json(root / "schema.json", original)
+                with self.assertRaisesRegex(ValueError, "review-schema"):
+                    check_schema_use(pipeline, require_review=True)
                 pipeline.review_schema()
                 self.assertEqual(read_json(root / "schema.json")["properties"][0]["datatype"], "number")
                 self.assertEqual(read_json(root / "draft-schema.json")["properties"][0]["datatype"], "integer")
@@ -353,7 +360,7 @@ class IntranetTests(unittest.TestCase):
                 from code_ontology.schema_review import check_schema_use
                 pipeline.settings = replace(pipeline.settings, stage_overrides={"review": {"timeout": 300}})
                 with self.assertRaisesRegex(ValueError, "configuration changed"):
-                    check_schema_use(pipeline)
+                    check_schema_use(pipeline, require_review=True)
             finally:
                 pipeline.close()
 

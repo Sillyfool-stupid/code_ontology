@@ -209,11 +209,15 @@ class Pipeline:
     def save_state(self, stage, status, **detail):
         self.state["stages"][stage] = {"state": status, "updated_at": now(), **detail}
         write_json(self.output / "run_manifest.json", self.state)
+        from .artifacts import index_experiment
+        index_experiment(self.dest, self.namespace, self.view, self.profile, self.state)
 
     def execute_jobs(self, stage, jobs):
         """Bounded parallelism; every failed job gets a persistent, rerunnable task record."""
         results = []
         completed = 0
+        from .events import emit
+        emit("progress", stage=stage, completed=0, total=len(jobs), successful=0, failed=0, unknown=0, message="实例任务开始")
         print(f"STAGE {stage}: {len(jobs)} tasks", flush=True)
         iterator = iter(jobs)
         with ThreadPoolExecutor(max_workers=self.settings.for_stage("extract").concurrency) as pool:
@@ -242,12 +246,15 @@ class Pipeline:
                         write_json(job["path"].with_suffix(".failed.json"), error)
                     completed += 1
                     print(f"TASK {stage} {completed}/{len(jobs)} ({len(results)} successful)", flush=True)
+                    emit("progress", stage=stage, completed=completed, total=len(jobs), successful=len(results),
+                         failed=sum(e.get("state") == "failed" for e in self.errors),
+                         unknown=sum(e.get("state") == "unknown" for e in self.errors),
+                         remaining=len(jobs)-completed, message="实例任务处理结束")
         return results
 
     def discover(self):
         self.discover_local()
-        self.merge_schema()
-        return self.review_schema()
+        return self.merge_schema()
 
     def fixed_schema(self, supplied: Path | None = None, update=False):
         path = supplied or self.output / "schema" / "schema.json"
@@ -513,7 +520,7 @@ def report_run(output: Path):
     text += [f"| {clean(c['name'])} | {clean(c['definition'])} | {', '.join(c['evidence_ids'])} |" for c in schema["classes"]]
     text += ["", "## 追溯", "", "- schema/schema.json：固定 schema；schema/selection.json：发现范围。",
              "- schema/draft-schema.json：原始合并草稿；schema/review-report.json：AI 审查记录。",
-             "- schema-scope.json：Schema 选择及是否显式跳过 AI 审查。",
+             "- schema-scope.json：Schema 选择及实际 AI 审查状态；合并后可直接抽取。",
              "- extraction/selection.json：实例任务与被省略的 schema 项。",
              "- evidence.jsonl：证据到源码快照的路径和行号。",
              "- llm_requests/：渲染后的请求、原始回答与实际参数。",

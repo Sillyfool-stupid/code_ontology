@@ -1,0 +1,25 @@
+# Optional new experiments. Existing .env values retain precedence.
+config_version: 1
+run:
+  repo: ../../examples/mini-plant
+  out: ../../outputs/intranet-v2
+  experiment: optimized-01
+  view: ast
+  profile: general
+defaults:
+  policy:
+    views: [ast]
+    profiles: [general]
+    discovery_max_packs: 0
+    prompt_dir: ../../code_ontology/resources/prompts-v2
+  llm:
+    context_tokens: 16384
+    max_output_tokens: 4096
+steps:
+  scan: steps/scan.yaml
+  parse: steps/parse.yaml
+  prepare: steps/prepare.yaml
+  discover: steps/discover.yaml
+  merge: steps/merge.yaml
+  review: steps/review.yaml
+  extract: steps/extract.yaml

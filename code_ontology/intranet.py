@@ -12,6 +12,7 @@ import time
 
 from .config import PROJECT, env_values, load_policy, load_settings, configuration_sources
 from .util import digest, now, read_json, write_json, file_hash
+from .events import execution, emit, redact
 
 STEPS = ("scan", "parse", "normalize", "prepare", "discover-local", "merge-schema", "review-schema", "extract", "finalize", "validate", "report")
 
@@ -42,8 +43,7 @@ class Tee:
         self.stream, self.file, self.secret = stream, file, secret
 
     def write(self, value):
-        if self.secret and self.secret != "unused":
-            value = value.replace(self.secret, "<redacted>")
+        value = redact(value, self.secret)
         self.stream.write(value); self.file.write(value); self.file.flush()
         return len(value)
 
@@ -60,10 +60,12 @@ def session_config(args):
     envpath = Path(args.env_file).resolve()
     env = env_values(str(envpath))
     base = envpath.parent
-    name = args.experiment or env.get("CO_EXPERIMENT") or "baseline-01"
+    from .config_bundle import read_bundle
+    run = read_bundle(args.config)["run"]
+    name = args.experiment or env.get("CO_EXPERIMENT") or run.get("experiment") or "baseline-01"
     if not re.fullmatch(r"[\w-]{1,80}", name):
         raise ValueError("Invalid experiment name")
-    out = Path(args.out).resolve() if args.out else Path(resolve(env, "CO_OUTPUT", base, "outputs/intranet"))
+    out = Path(args.out).resolve() if args.out else Path(resolve(env, "CO_OUTPUT", base, run.get("out", "outputs/intranet")))
     path = out / "sessions" / f"{name}.json"
     return envpath, env, base, name, out, path
 
@@ -197,7 +199,7 @@ def main(argv=None):
     parser = argparse.ArgumentParser(description="Intranet step runner: edit .env once; steps never run upstream implicitly")
     parser.add_argument("step", choices=("init", "status", "config", "doctor", "check", "smoke", "run", *STEPS))
     parser.add_argument("--env-file", default=str(PROJECT / ".env"))
-    parser.add_argument("--config", help="Optional legacy YAML")
+    parser.add_argument("--config", help="Policy YAML or directory containing run.yaml")
     parser.add_argument("--repo")
     parser.add_argument("--out")
     parser.add_argument("--experiment")
@@ -211,7 +213,12 @@ def main(argv=None):
             from .intranet_smoke import run
             return run(Path(args.out).resolve() / "smoke" if args.out else PROJECT / "outputs/intranet-smoke")
         envpath, env, base, name, out, path = session_config(args)
-        policy, settings = load_policy(args.config, str(envpath)), load_settings(str(envpath))
+        policy, settings = load_policy(args.config, str(envpath)), load_settings(str(envpath), args.config)
+        from .config_bundle import read_bundle
+        run_config = read_bundle(args.config)["run"]
+        for field, env_key in (("view", "CO_VIEW"), ("profile", "CO_PROFILE")):
+            if run_config.get(field) and not env.get(env_key):
+                policy[field + "s"] = [run_config[field]]
         if args.step in {"doctor", "check"}:
             from .cli import doctor
             return doctor(settings, out / "doctor", not args.with_llm, policy)
@@ -240,7 +247,7 @@ def main(argv=None):
             return 0
         with writer_lock(out):
             if args.step == "init":
-                repo = str(Path(args.repo).resolve()) if args.repo else resolve(env, "CO_REPO", base)
+                repo = str(Path(args.repo).resolve()) if args.repo else resolve(env, "CO_REPO", base, run_config.get("repo", ""))
                 if not repo or not Path(repo).is_dir():
                     raise ValueError("Set CO_REPO in .env or use init --repo PATH")
                 old = read_json(path) if path.is_file() else {}
@@ -265,6 +272,8 @@ def main(argv=None):
                     raise ValueError("Explicit schema file does not exist")
                 session["schema_file"] = selected_schema
             steps = STEPS[:STEPS.index(args.to)+1] if args.step == "run" else (args.step,)
+            if args.step == "run" and args.to != "review-schema":
+                steps = tuple(step for step in steps if step != "review-schema")
             for step in steps:
                 log = out / "sessions" / name / f"{step}-{time.time_ns()}.log"
                 log.parent.mkdir(parents=True, exist_ok=True)
@@ -273,7 +282,14 @@ def main(argv=None):
                 session["stages"][step] = record
                 write_json(path, session)
                 write_json(log.with_suffix(".config.json"), {"settings": settings.public(), "policy": policy})
-                with log.open("w", encoding="utf-8") as handle, redirect_stdout(Tee(sys.stdout, handle, settings.api_key)), redirect_stderr(Tee(sys.stderr, handle, settings.api_key)):
+                with log.open("w", encoding="utf-8") as handle, redirect_stdout(Tee(sys.stdout, handle, settings.api_key)), redirect_stderr(Tee(sys.stderr, handle, settings.api_key)), execution(out, name, step, settings.api_key) as activity:
+                    record["execution_id"] = activity["execution_id"]
+                    record["events"] = activity["events"]
+                    activity["log"] = str(log)
+                    # Publish the association before a slow request starts so
+                    # the web reader can follow the live CLI log immediately.
+                    write_json(path, session)
+                    write_json(Path(activity["events"]).parent / "execution.json", activity)
                     print(f"START {step} {now()} log={log}", flush=True)
                     try:
                         code = execute(step, session, settings, policy)
@@ -290,6 +306,8 @@ def main(argv=None):
                     finally:
                         record["fingerprint"] = stage_fingerprint(step, session, settings, policy)
                         write_json(path, session)
+                        activity["state"] = record["state"]
+                        emit("stage_ended", state=record["state"], message="阶段执行结束", artifact=record["log"])
                 if code:
                     return code
         return 0

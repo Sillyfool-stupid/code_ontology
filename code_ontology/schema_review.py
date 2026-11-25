@@ -12,9 +12,14 @@ from .schema_history import SchemaHistory, split_location
 from .schema_merge import (CATEGORIES, MergeResponse, SourceMapping, alignment_findings,
                            canonical_merge, merge_payload, retain_source_metadata, validate_merge)
 from .util import canonical, digest, now, read_json, write_json, write_jsonl
+from .events import emit
+from .review_ledger import update_ledger
+import time
 
 
 class ReviewIssue(StrictModel):
+    issue_id: str = ""
+    category: str = "semantic"
     source_ids: list[str] = Field(default_factory=list)
     target_ids: list[str] = Field(default_factory=list)
     severity: Literal["info", "warning", "error"]
@@ -70,6 +75,18 @@ class SchemaReview:
         self.settings = pipeline.settings.for_stage("review")
         self.system = prompt(pipeline.policy, pipeline.profile, "review")
         self.llm = LLM(self.settings, pipeline.dest / "cache/llm")
+        self.started = time.monotonic()
+        self.llm.request_guard = self.check_budget
+
+    def check_budget(self, messages):
+        from .stages import IncompleteStage
+        from .util import token_bound
+        stats, policy = self.llm.stats, self.p.policy
+        exhausted = (policy.get("review_max_requests", 0) and stats["requests"] >= policy["review_max_requests"]
+            or policy.get("review_max_seconds", 0) and time.monotonic()-self.started >= policy["review_max_seconds"]
+            or policy.get("review_max_tokens", 0) and (stats["usage_missing"] or stats["prompt_tokens"]+stats["completion_tokens"]+token_bound(messages)+self.settings.max_output_tokens > policy["review_max_tokens"]))
+        if exhausted:
+            raise IncompleteStage("Review budget reached or usage unknown; checkpoints retained. Inspect review report before resuming")
 
     def close(self):
         self.p.stage_stats.append(dict(self.llm.stats))
@@ -80,7 +97,8 @@ class SchemaReview:
                        "mapping": read_json(self.root / "draft-source-mapping.json"),
                        "settings": self.settings.public(), "prompt": self.system,
                        "packs": self.p.packs, "batch_items": self.p.policy["review_batch_items"],
-                       "max_rounds": self.p.policy["review_max_rounds"], "review_protocol": 2,
+                       "max_rounds": self.p.policy["review_max_rounds"], "review_protocol": 3,
+                       "budgets": {key: self.p.policy.get(key, 0) for key in ("review_max_requests", "review_max_seconds", "review_max_tokens")},
                        "contract": ReviewResponse.model_json_schema()}, 40)
 
     def run(self):
@@ -105,6 +123,7 @@ class SchemaReview:
         schema = Ontology.model_validate(read_json(self.root / "draft-schema.json"))
         checkpoints, history = [], []
         decisions = {}
+        ledger = {}
         archive.snapshot("input", [schema.model_dump()], mapping=audit)
 
         def combined(value, ids):
@@ -139,6 +158,7 @@ class SchemaReview:
             packs = [{k: p[k] for k in ("pack_id", "kind", "code", "source_refs", "evidence_ids")}
                      for p in self.p.packs if evidence.intersection(p["evidence_ids"])]
             return {"stage": "review", "profile": self.p.profile, "current_schema": schema.model_dump(),
+                    "pending_issues": [row for row in ledger.values() if row["status"] == "unresolved" and (not row["source_ids"] or set(ids).intersection(row["source_ids"]))],
                     "source_items": [{"category": source_index[sid]["category"], "item": source_rows[sid],
                                       "current_mapping": mappings[sid].model_dump()} for sid in ids],
                     "class_context": [{"item": source_rows[ref], "current_mapping": mappings[ref].model_dump()} for ref in sorted(references)],
@@ -217,6 +237,9 @@ class SchemaReview:
                 accepted, pending, decisions = assess_alignment(result, original, decisions, current_issues)
                 checkpoints.append(path.relative_to(self.root).as_posix())
                 history.extend([{"round": round_number, **i.model_dump()} for i in value.issues])
+                update_ledger(ledger, value.issues, schema, round_number)
+                write_json(self.root / "review-issues.json", {"issues": list(ledger.values()), "schema_hash": digest(schema.model_dump()),
+                           "business_acceptance": "pending_human_review", "coverage": {"planned_sources": len(source_rows), "completed_checkpoints": len(checkpoints)}})
                 write_json(self.root / "review-candidate.json", schema.model_dump())
                 archive.snapshot(f"{location}/result", [schema.model_dump()],
                     mapping=[m.model_dump() for m in result.source_mapping],
@@ -242,15 +265,17 @@ class SchemaReview:
                 batches = [ids[i:i+size] for i in range(0, len(ids), size)]
                 history_start = len(history)
                 for i, batch in enumerate(batches):
+                    emit("progress", stage="review", completed=i, total=len(batches), round=round_number, message="审查批次开始")
                     print(f"REVIEW round={round_number} batch={i+1}/{len(batches)} source_items={len(batch)} started={now()}", flush=True)
                     process(batch, round_number, f"round-{round_number:03d}/batch-{i+1:03d}")
+                    emit("progress", stage="review", completed=i+1, total=len(batches), successful=i+1, round=round_number, message="审查批次完成")
                     write_json(self.root / "review-status.json", {"state": "running", "key": key, "round": round_number,
                                "completed": i+1, "total": len(batches), "updated_at": now()})
                 result = MergeResponse(ontology=schema, source_mapping=list(mappings.values()))
                 accepted, findings, decisions = assess_alignment(result, original, decisions)
                 archive.snapshot(f"round-{round_number:03d}/result", [schema.model_dump()],
                     mapping=[m.model_dump() for m in result.source_mapping], program_findings=findings, ai_corrections=accepted)
-                errors = [i for i in history[history_start:] if i["severity"] == "error" and i["status"] == "unresolved"]
+                errors = [i for i in ledger.values() if i["severity"] == "error" and i["status"] == "unresolved"]
                 write_json(self.root / "review-report.json", {"key": key, "issues": history, "program_findings": findings,
                            "ai_corrections": accepted, "history": str(archive.root),
                            "review_status": "ai_review_not_human_verified", "checkpoints": checkpoints})
@@ -305,8 +330,8 @@ class SchemaReview:
             raise ValueError("Reviewed schema/mapping changed; rerun review-schema")
 
 
-def check_schema_use(pipeline):
-    """Default requires review; explicit override remains auditable and never fakes review success."""
+def check_schema_use(pipeline, require_review=False):
+    """Allow the merged draft by default; require AI review only on explicit request."""
     from .stages import SchemaStages
     runner = SchemaStages(pipeline, "merge")
     try:
@@ -318,9 +343,12 @@ def check_schema_use(pipeline):
         try:
             reviewer.verify()
         except ValueError:
-            if pipeline.policy["allow_unreviewed_schema"]:
-                return "explicit_unreviewed_override"
-            raise
+            if require_review:
+                raise
+            root = pipeline.output / "schema"
+            if read_json(root / "schema.json") != read_json(root / "draft-schema.json"):
+                raise ValueError("Current schema differs from merged draft without valid review provenance; rerun merge-schema or explicitly select a schema")
+            return "merged_unreviewed"
     finally:
         reviewer.close()
     return "ai_reviewed_not_human_verified"

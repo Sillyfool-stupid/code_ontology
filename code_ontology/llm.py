@@ -6,6 +6,7 @@ import re
 import sqlite3
 import threading
 import time
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 from openai import OpenAI, APIConnectionError, APITimeoutError, APIStatusError
@@ -13,6 +14,7 @@ from pydantic import ValidationError
 
 from .config import Settings
 from .util import canonical, digest, now, read_json, token_bound, write_json
+from .events import emit
 
 
 class BudgetError(ValueError):
@@ -40,6 +42,15 @@ def parse_json(text: str):
     return result
 
 
+def trace_path(directory: Path, key: str, kind: str, attempt: int | None = None) -> Path:
+    """Sort trace files by Beijing creation time, retaining nanoseconds and request identity."""
+    instant = time.time_ns()
+    local = datetime.fromtimestamp(instant // 1_000_000_000, timezone(timedelta(hours=8)))
+    stamp = f"{local:%Y%m%d-%H%M%S}-{instant % 1_000_000_000:09d}-UTC08"
+    suffix = f"-{attempt}" if attempt is not None else ""
+    return directory / f"{stamp}-{key}-{kind}{suffix}.json"
+
+
 class LLM:
     def __init__(self, settings: Settings, cache_dir: Path):
         if not settings.base_url or not settings.model:
@@ -55,6 +66,9 @@ class LLM:
         self.semaphore = threading.BoundedSemaphore(settings.concurrency)
         self.json_supported = settings.json_mode != "off"
         self.stats = {"requests": 0, "cache_hits": 0, "retries": 0, "repairs": 0, "prompt_tokens": 0, "completion_tokens": 0}
+        self.stats.update(request_seconds=0.0, unknown_requests=0, truncated_requests=0, usage_missing=0)
+        self.wait_messages = True
+        self.request_guard = None
         self._http = None
         if settings.ca_bundle:
             import httpx
@@ -89,6 +103,8 @@ class LLM:
             raise BudgetError("Request exceeds conservative context budget; decrease pack_tokens/batch_packs or enlarge LLM_CONTEXT_TOKENS")
         with self.semaphore:
             for attempt in range(self.settings.retries + 2):
+                if self.request_guard:
+                    self.request_guard(messages)
                 params = {"model": self.settings.model, "messages": messages, "max_tokens": self.settings.max_output_tokens,
                           "temperature": self.settings.temperature}
                 if not self.settings.send_max_tokens:
@@ -101,12 +117,16 @@ class LLM:
                     params["response_format"] = {"type": "json_object"}
                 record = {"created_at": now(), "key": key, "repair": repair, "attempt": attempt,
                           "endpoint": self.settings.public()["base_url"], "parameters": params}
-                path = traces / f"{key}-{'repair' if repair else 'initial'}-{attempt}-{time.time_ns()}.json"
+                path = trace_path(traces, key, "repair" if repair else "initial", attempt)
                 write_json(path, record)
                 started = time.monotonic()
+                emit("request_started", request_id=key, attempt=attempt, repair=repair,
+                     message="模型请求已提交", artifact=str(path))
                 heartbeat = threading.Event()
                 def progress():
                     while not heartbeat.wait(15):
+                        if not self.wait_messages:
+                            continue
                         print(f"WAIT model stage={key[:10]} started={record['created_at']} elapsed={time.monotonic()-started:.0f}s log={path}", flush=True)
                 monitor = threading.Thread(target=progress, daemon=True)
                 monitor.start()
@@ -124,6 +144,9 @@ class LLM:
                         with self.lock:
                             self.stats["prompt_tokens"] += response.usage.prompt_tokens or 0
                             self.stats["completion_tokens"] += response.usage.completion_tokens or 0
+                    else:
+                        with self.lock:
+                            self.stats["usage_missing"] += 1
                     if choice and choice.finish_reason == "length":
                         raise BudgetError("Model output truncated; split this task or increase output/context budget")
                     # Empty text is handled by the same single repair pass as malformed JSON.
@@ -154,6 +177,19 @@ class LLM:
                 finally:
                     heartbeat.set()
                     monitor.join(timeout=1)
+                    elapsed = round(time.monotonic() - started, 3)
+                    record.update(ended_at=now(), elapsed_seconds=elapsed)
+                    if "state" not in record:
+                        record["state"] = "truncated" if record.get("finish_reason") == "length" else "failed" if record.get("error") else "responded"
+                    write_json(path, record)
+                    with self.lock:
+                        self.stats["request_seconds"] += elapsed
+                        self.stats["unknown_requests"] += record["state"] == "unknown"
+                        self.stats["truncated_requests"] += record["state"] == "truncated"
+                    emit("request_ended", request_id=key, state=record["state"], elapsed_seconds=elapsed,
+                         usage=record.get("usage"), finish_reason=record.get("finish_reason"), artifact=str(path),
+                         level="warning" if record["state"] in {"unknown", "failed", "truncated"} else "info",
+                         message="模型请求结束；响应仍须通过契约校验")
                 with self.lock:
                     self.stats["retries"] += 1
                 time.sleep(min(20, 2 ** attempt) + random.random() / 4)
@@ -161,7 +197,8 @@ class LLM:
 
     def call(self, system: str, payload: dict, model_type, traces: Path, validator=None, namespace: str = ""):
         messages = [{"role": "system", "content": system}, {"role": "user", "content": canonical(payload)}]
-        key = digest({"messages": messages, "settings": self.settings.public(), "contract": model_type.model_json_schema(), "namespace": namespace}, 40)
+        identity = {"messages": messages, "settings": self.settings.request_identity(), "contract": model_type.model_json_schema(), "namespace": namespace}
+        key = digest(identity, 40)
         cache = self.directory / "responses" / f"{key}.json"
 
         def validate(value):
@@ -170,12 +207,20 @@ class LLM:
                 validator(result)
             return result
 
+        # Old caches are accepted only if the exact original input/contract/namespace key
+        # and effective response parameters match. Do not infer equivalence from names.
+        if not cache.is_file():
+            legacy_key = digest({**identity, "settings": self.settings.public()}, 40)
+            legacy = self.directory / "responses" / f"{legacy_key}.json"
+            if legacy.is_file():
+                write_json(cache, validate(read_json(legacy)).model_dump())
         if cache.is_file():
             result = validate(read_json(cache))
             with self.lock:
                 self.stats["cache_hits"] += 1
-            write_json(traces / f"{key}-cache.json", {"key": key, "cache": str(cache), "state": "success", "cached": True})
+            write_json(trace_path(traces, key, "cache"), {"created_at": now(), "key": key, "cache": str(cache), "state": "success", "cached": True})
             self.state(key, "success", "cache_hit")
+            emit("cache_hit", request_id=key, message="复用已校验响应")
             return result
         self.state(key, "running")
         try:

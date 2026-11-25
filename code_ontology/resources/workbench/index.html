@@ -16,7 +16,7 @@
   <div class="side-foot"><i></i> 本机运行 · 文件驱动<small>阶段任务与源码证据完整保留。<br>模型调用按当前配置执行。</small></div>
 </aside>
 <div class="workspace">
-  <header><span>WORKSPACE <b>/</b> STAGE WORKBENCH</span><button id="refresh" class="button">刷新状态</button></header>
+  <header><span>WORKSPACE <b>/</b> STAGE WORKBENCH</span><div class="actions"><button id="back-page" class="button" disabled>返回上一页</button><button id="refresh" class="button">刷新状态</button></div></header>
   <main>
     <div class="heading"><div class="eyebrow">SOURCE → STRUCTURE → ONTOLOGY</div><h1>让抽取过程，每一步都看得见。</h1><p>选择目录，逐阶段运行，检查输入、产物与源码依据。</p></div>
     <div id="notice" class="notice" hidden role="status"></div>
@@ -33,7 +33,7 @@
         <label>领域提示词<select name="profile"><option value="maintenance">设备运维 maintenance</option><option value="general">通用 general</option></select></label>
         <label class="span2">已有快照（可留空，先执行扫描）<div class="path-field"><input name="snapshot" placeholder="扫描后自动填入；也可选择已有快照"><button type="button" id="find-snapshots" class="button">查找快照</button></div><select id="snapshot-select" hidden aria-label="已有快照"></select></label>
         <label class="span2">人工参考 gold 文件（可选）<div class="path-field"><input name="gold" placeholder="不配置则跳过参考概念匹配"><button type="button" data-browse="gold" class="button">浏览</button></div></label>
-        <div class="form-actions span2"><span>常用配置读取 .env；YAML 仅用于可选覆盖，密钥不会显示在页面。</span><button class="button primary" type="submit">保存工作区</button></div>
+        <div class="form-actions span2"><span>常用配置读取 .env；YAML 仅用于可选覆盖，密钥不会显示在页面。</span><button type="button" id="cancel-settings" class="button">返回当前工作区</button><button class="button primary" type="submit">保存工作区</button></div>
       </form>
     </details>
     <section id="page-pipeline" class="page">
@@ -41,7 +41,7 @@
       <div class="section-head"><div><h2>逐阶段执行</h2><p>先检查输入，再执行当前步骤；已有快照可从中间继续。</p></div><span id="active-badge" class="badge">等待选择工作区</span></div>
       <div class="pipeline-layout"><div id="stages" class="stages"><div class="empty">保存工作区后即可开始，不需要已有实验产物。</div></div>
         <aside class="panel stage-detail"><div class="panel-head"><div><small>SELECTED STAGE</small><h2 id="detail-title">阶段详情</h2></div></div><div id="detail-body" class="panel-body empty">选择左侧阶段，查看输入、输出与执行计划。</div></aside></div>
-      <div class="panel task-panel"><div class="panel-head"><div><small>LIVE EXECUTION</small><h2>任务日志与历史</h2></div><div class="actions"><select id="job-select" aria-label="任务记录"></select><button id="cancel-job" class="button danger" disabled>停止任务</button><button id="ack-job" class="button" hidden>确认已检查残留进程</button></div></div><div id="job-meta" class="job-meta">执行任务后，日志会持续更新；关闭页面不会停止任务。</div><div class="toolbar"><button class="button" data-attempt="task.json">本次配置记录</button><button class="button" data-attempt="policy.yaml">冻结策略</button><button class="button" data-attempt="input-schema.json">输入 Schema 副本</button><button class="button" data-attempt="metrics.json">本次指标副本</button></div><pre id="attempt-content" class="json" hidden></pre><pre id="console" class="console">尚无任务。</pre></div>
+      <div class="panel task-panel"><div class="panel-head"><div><small>LIVE EXECUTION</small><h2>任务日志与历史</h2></div><div class="actions"><select id="job-select" aria-label="任务记录"></select><button id="cancel-job" class="button danger" disabled>停止任务</button><button id="ack-job" class="button" hidden>确认已检查残留进程</button></div></div><div id="job-meta" class="job-meta">执行任务后，日志会持续更新；关闭页面不会停止任务。</div><div class="toolbar"><button class="button" data-attempt="task.json">本次配置记录</button><button class="button" data-attempt="policy.yaml">冻结策略</button><button class="button" data-attempt="input-schema.json">输入 Schema 副本</button><button class="button" data-attempt="metrics.json">本次指标副本</button></div><button id="close-attempt" class="button" hidden>返回任务日志</button><pre id="attempt-content" class="json" hidden></pre><section class="execution-output" aria-label="执行过程输出"><div class="toolbar"><strong>执行过程</strong><select id="execution-source" aria-label="输出来源"><option value="job">当前网页任务</option></select><select id="event-level" aria-label="事件级别"><option value="">全部级别</option><option value="info">信息</option><option value="warning">警告</option><option value="error">错误</option></select><input id="event-query" placeholder="搜索执行事件"><label><input type="checkbox" id="follow-output" checked>跟随最新输出</label><button id="reload-events" class="button">重新读取</button></div><div class="execution-summary"><progress id="task-progress" max="1" value="0" aria-label="初始批次完成进度"></progress><span id="progress-label">等待执行任务</span></div><p class="muted execution-help">进度表示批次处理结束，不代表全部成功。请求等待仅显示已等待时长；模型回答在响应完成后保存。</p><div id="event-list" class="event-list" role="log" aria-live="polite"></div></section><details open><summary>完整文本日志</summary><pre id="console" class="console">尚无任务。</pre></details></div>
     </section>
     <section id="page-artifacts" class="page" hidden>
       <div class="section-head"><div><h2>检查输入与输出</h2><p>JSONL 按记录分页，文本按字节分段；原始文件完整保留在磁盘。</p></div></div>
@@ -55,8 +55,8 @@
   </main>
   <footer>CODE ATLAS <span>步骤执行 · 输入输出 · 源码证据</span></footer>
 </div>
-<dialog id="path-dialog"><div class="panel-head"><h2 id="path-title">选择路径</h2><button type="button" id="close-path" class="button">关闭</button></div><div class="toolbar"><input id="browse-path"><button id="browse-go" class="button">转到</button><button id="browse-up" class="button">上级</button></div><div id="browse-list" class="browser-list"></div><div class="toolbar"><span id="browse-status" class="muted"></span><button id="use-directory" class="button primary">选择此目录</button></div></dialog>
-<dialog id="plan-dialog"><div class="panel-head"><h2 id="plan-title">执行计划</h2><button id="close-plan" class="button">关闭</button></div><div class="panel-body"><p id="plan-note"></p><div id="plan-inputs"></div><details><summary>实际执行命令</summary><pre id="plan-command" class="json"></pre></details><label id="update-schema-label" hidden><input id="update-schema" type="checkbox"> 显式更新已有 Schema（改变后需重新抽取实例）</label><div class="actions"><button id="execute-plan" class="button primary">执行当前阶段</button></div></div></dialog>
+<dialog id="path-dialog"><div class="panel-head"><h2 id="path-title">选择路径</h2><button type="button" id="close-path" class="button">关闭</button></div><div class="toolbar"><input id="browse-path"><button id="browse-go" class="button">转到</button><button id="browse-back" class="button" disabled>返回上一处</button><button id="browse-up" class="button">上级</button></div><div id="browse-list" class="browser-list"></div><div class="toolbar"><span id="browse-status" class="muted"></span><button id="use-directory" class="button primary">选择此目录</button></div></dialog>
+<dialog id="plan-dialog"><div class="panel-head"><h2 id="plan-title">执行计划</h2><button id="close-plan" class="button">关闭</button></div><div class="panel-body"><p id="plan-note"></p><div id="plan-inputs"></div><details><summary>实际执行命令</summary><pre id="plan-command" class="json"></pre></details><label id="update-schema-label" hidden><input id="update-schema" type="checkbox"> 显式更新已有 Schema（改变后需重新抽取实例）</label><div class="actions"><button id="cancel-plan" class="button">返回阶段</button><button id="execute-plan" class="button primary">执行当前阶段</button></div></div></dialog>
 <div id="toast" hidden role="status"></div>
 <script src="/app.js" defer></script>
 </body></html>

@@ -1,0 +1,7 @@
+policy:
+  review_batch_items: 32
+  review_max_requests: 100
+  review_max_seconds: 0
+  review_max_tokens: 0
+llm:
+  concurrency: 1

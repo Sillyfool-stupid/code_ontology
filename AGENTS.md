@@ -119,7 +119,7 @@
 ## 新版内网入口与维护
 
 - `scripts/intranet.bat` / `.sh` 仅启动同一 `code_ontology.intranet` Python 入口，日常修改 `.env` 即可；新增配置名以 `.env.example` 为准。原 `.env` 不自动覆盖。
-- 顺序为 init → scan → parse → normalize → prepare → discover-local → merge-schema → review-schema → extract → finalize → validate → report。merge-schema 先保存合法草稿与对齐问题，review-schema 独立 AI 审查修正；CO_ALLOW_UNREVIEWED_SCHEMA=true 可显式使用未审查 Schema 抽取，必须记录来源状态，不伪造审查通过。status 不持写锁，可在任务运行时查看。普通单步不得隐式启动上游模型任务。
+- 顺序为 init → scan → parse → normalize → prepare → discover-local → merge-schema → extract → finalize → validate → report。merge-schema 先保存合法草稿与对齐问题，review-schema 独立 AI 审查修正；AI 审查为可选步骤，合并成功即可抽取；旧 CO_ALLOW_UNREVIEWED_SCHEMA=false 不再强制审查。必须记录来源状态，不伪造审查通过。status 不持写锁，可在任务运行时查看。普通单步不得隐式启动上游模型任务。
 - 每次合并与审查的逐轮、逐批 Schema/映射历史位于 schema/history/；旧版本不覆盖。局部与合并的检查点见 `code_ontology/stages.py`，extract/finalize 兼容逻辑在 pipeline.py。修改合并参数不得使未变化的局部请求重新执行。
 - 默认 mixed，允许英文/中文共存，保留源码标识符；不强制翻译或为每个函数建立业务概念。无需独立全量“补注释”模型阶段。
 - 新内网启动器与工作台共享输出 OS 写锁；历史直接 CLI 未加入启动器的父锁，不并发写同一输出。

@@ -23,12 +23,13 @@ from .parsing import select_backend, snapshot_parser
 from .prepare import __file__ as prepare_implementation
 from .util import canonical, digest, file_hash, now, read_json, within, write_json
 from .workbench_files import Preview, checked, listing
+from .events import read_events, redact
 
 STAGES = [
     ("doctor", "检查环境", False), ("connection", "测试模型连接", True),
     ("scan", "扫描仓库", False), ("parse", "解析并导出结构", False),
     ("prepare", "生成模型输入包", False), ("discover-local", "局部 Schema 提取", True),
-    ("merge-schema", "合并 Schema（保存草稿）", True), ("review-schema", "AI 审查并修正 Schema", True), ("discover", "发现并合并 Schema（兼容）", True),
+    ("merge-schema", "合并 Schema（可直接抽取）", True), ("review-schema", "AI 审查并修正 Schema（可选）", True), ("discover", "发现并合并 Schema（兼容）", True),
     ("extract", "抽取实例与规则", True), ("finalize", "归并实例产物", False), ("validate", "校验结果", False),
     ("evaluate", "匹配参考概念", False), ("report", "生成对比报告", False),
     ("sample", "生成审核表", False), ("summarize", "汇总人工审核", False),
@@ -140,7 +141,7 @@ class Workbench:
             config = Path(fields["config"]).resolve() if fields.get("config") else None
             envfile = Path(fields.get("env_file") or self.project / ".env").resolve()
             policy = load_policy(str(config) if config else None, str(envfile))
-            settings = load_settings(str(envfile))
+            settings = load_settings(str(envfile), str(config) if config else None)
             info = snapshot_parser(Path(snap)) if snap else select_backend(policy, settings)
             if view not in info["available_views"]:
                 view = "ast"
@@ -159,7 +160,7 @@ class Workbench:
             relative = self.state.relative_to(Path(w["repo"])).as_posix()
             if relative and relative not in policy["exclude"]:
                 policy["exclude"] = [*policy["exclude"], relative]
-        return policy, load_settings(w["env_file"])
+        return policy, load_settings(w["env_file"], w["config"] or None)
 
     def fingerprint(self, w, policy, settings, stage="experiment"):
         directory = Path(policy.get("prompt_dir") or RESOURCE / "prompts")
@@ -199,7 +200,7 @@ class Workbench:
                            "local": stamp(Path(w["snapshot"]) / "runs" / w["experiment"] / w["view"] / w["profile"] / "schema/local-manifest.json") if stage == "merge-schema" and w["snapshot"] else None,
                            "settings": effective, "output_language": policy["output_language"],
                            "prompts": selected_prompts, "pack_policy": {k:policy[k] for k in pack_keys},
-                           "discovery": [policy["discovery_max_packs"],policy["batch_packs"],policy["merge_max_rounds"]]})
+                           "discovery": [policy["discovery_max_packs"],policy["batch_packs"],policy["merge_max_rounds"],policy["discovery_strategy"]]})
         if stage in {"validate", "evaluate", "report", "sample", "summarize"}:
             final = {p.name: stamp(p) for p in (run / "final").glob("*")} if run else {}
             reference = stamp(Path(w["gold"])) if stage == "evaluate" and w["gold"] else None
@@ -208,7 +209,9 @@ class Workbench:
         return digest({**base, "policy": {**policy, "prompt_dir": "<content>"}, "settings": settings.public(), "prompts": prompts})
 
     def roots(self, w):
-        roots = {"repo": Path(w["repo"]), "config": Path(w["config"]).parent if w["config"] else Path(w["env_file"]).parent,
+        config = Path(w["config"]) if w["config"] else None
+        roots = {"repo": Path(w["repo"]), "config": (config if config.is_dir() else config.parent) if config else Path(w["env_file"]).parent,
+                 "experiments": Path(w["out"]) / "experiments", "executions": Path(w["out"]) / "executions",
                  "doctor": self.state / "diagnostics" / w["id"], "reviews": Path(w["out"]) / "reviews" / w["experiment"]}
         if w["snapshot"]:
             roots["snapshot"] = Path(w["snapshot"])
@@ -267,10 +270,9 @@ class Workbench:
         if stage == "extract":
             required += [run / "schema" / "schema.json"]
             if (run / "schema/local-manifest.json").is_file():
-                policy, _ = self.settings(w)
-                status = run / "schema/review-status.json"
-                if not policy["allow_unreviewed_schema"] and (not status.is_file() or read_json(status).get("state") != "success"):
-                    return ["请先完成 AI 审查并修正 Schema；仅显式设置 CO_ALLOW_UNREVIEWED_SCHEMA=true 才可使用草稿抽取"]
+                status = run / "schema/merge-status.json"
+                if not status.is_file() or read_json(status).get("state") != "success":
+                    return ["请先成功合并 Schema，再抽取实例；AI 审查为可选步骤"]
         if stage in {"validate", "evaluate", "sample"}:
             required += [run / "final" / "schema.json"]
         if stage == "evaluate":
@@ -418,7 +420,7 @@ class Workbench:
         if stage in {"discover", "discover-local", "merge-schema", "review-schema", "finalize", "extract"}:
             args += [stage, "--snapshot", snap, "--view", w["view"], "--profile", w["profile"], "--experiment", w["experiment"]] + common
             if stage == "extract":
-                args += ["--defer-finalize", "--schema", str(run / "schema" / "schema.json"), "--require-schema-review"]
+                args += ["--defer-finalize", "--schema", str(run / "schema" / "schema.json"), "--require-current-schema"]
             elif options.get("update_schema"):
                 args += ["--update-schema"]
             return args
@@ -442,7 +444,7 @@ class Workbench:
         s = next(x for x in d["stages"] if x["id"] == stage)
         return {"stage": stage, "label": s["label"], "model": s["model"], "blocked": s["blocked"],
                 "command": self._command(stage, d["workspace"], d["workspace"]["config"], d["workspace"]["env_file"], options or {}),
-                "inputs": s["inputs"], "fingerprint": self.fingerprint(d["workspace"], d["policy"], load_settings(d["workspace"]["env_file"]), stage),
+                "inputs": s["inputs"], "fingerprint": self.fingerprint(d["workspace"], d["policy"], load_settings(d["workspace"]["env_file"], d["workspace"]["config"] or None), stage),
                 "note": "局部提取与合并可独立运行；实例抽取后执行归并实例产物。discover 是保留的组合入口。"}
 
     def submit(self, wid, stage, options=None):
@@ -481,12 +483,14 @@ class Workbench:
                 environment[key] = str(getattr(settings, field))
             for stage_name in ("discover", "merge", "review", "extract"):
                 overrides = settings.stage_overrides.get(stage_name, {})
-                for attr in ("context_tokens", "max_output_tokens", "send_max_tokens", "timeout", "retries", "concurrency"):
+                for attr in ("context_tokens", "max_output_tokens", "send_max_tokens", "timeout", "retries", "concurrency", "temperature", "json_mode", "thinking"):
                     value = overrides.get(attr, "")
                     suffix = MODEL_ENV[attr].removeprefix("LLM_")
                     environment[f"LLM_{stage_name.upper()}_{suffix}"] = str(value)
             environment["CO_FROZEN_POLICY"] = str(config.resolve())
             environment["PYTHONIOENCODING"] = "utf-8"
+            environment.update(CO_EXECUTION_ID=jid, CO_EVENT_EXPERIMENT=w["experiment"], CO_EVENT_STAGE=stage,
+                               CO_EVENT_FILE=str(directory / "events.jsonl"))
             j = {"id": jid, "workspace": wid, "stage": stage, "state": "queued", "created_at": now(),
                  "workspace_config": w, "settings": settings.public(), "fingerprint": plan["fingerprint"],
                  "command": command, "options": options, "log": str(directory / "console.log"),
@@ -614,16 +618,38 @@ class Workbench:
                 self.update_job(jid, state="running", pid=p.pid, started_at=now())
             with Path(job["log"]).open("w", encoding="utf-8", buffering=1) as log:
                 for line in p.stdout:
-                    if secret and secret != "unused":
-                        line = line.replace(secret, "<redacted>")
+                    line = redact(line, secret)
                     line = re.sub(r"sk-[A-Za-z0-9_-]{20,}", "<redacted>", line)
+                    marker = line.find("CO_EVENT ")
+                    event = None
+                    if marker >= 0:
+                        try:
+                            event, end = json.JSONDecoder().raw_decode(line[marker+len("CO_EVENT "):])
+                            if not isinstance(event, dict) or not {"time", "level", "stage", "message", "kind"} <= event.keys():
+                                event = None
+                        except (ValueError, TypeError):
+                            pass  # Text logs must never terminate an otherwise healthy child.
+                    if event is not None:
+                        if marker:
+                            log.write(line[:marker] + "\n")
+                        trailing = line[marker+len("CO_EVENT ")+end:].strip()
+                        if trailing:
+                            log.write(trailing + "\n")
+                        log.write(f"{event['time']} [{event['level']}] {event['stage']} {event['message']}\n")
+                        if event["kind"] == "progress":
+                            self.update_job(jid, progress={"phase": event["stage"], **{
+                                key: event.get(key, 0) for key in ("completed", "total", "successful", "failed", "unknown", "remaining", "elapsed_seconds")}})
+                        else:
+                            self.update_job(jid, last_event=event)
+                        continue
                     log.write(line)
                     if line.startswith("SNAPSHOT="):
                         discovered = line.strip().split("=", 1)[1]
                     match = re.search(r"TASK (discover|extract|merge) (\d+)/(\d+) \((\d+) successful\)", line)
                     if match:
                         self.update_job(jid, progress={"phase": match[1], "completed": int(match[2]),
-                                                      "total": int(match[3]), "successful": int(match[4])})
+                                                      "total": int(match[3]), "successful": int(match[4]),
+                                                      "failed": max(0,int(match[2])-int(match[4]))})
                     merge = re.search(r"MERGE round=(\d+) batch=(\d+)/(\d+)", line)
                     if merge:
                         self.update_job(jid, progress={"phase": f"merge round {merge[1]}", "completed": int(merge[2])-1,
@@ -700,6 +726,63 @@ class Workbench:
         path = Path(j["log"])
         return self.preview.read(path, offset=offset) if path.is_file() else {"text": "", "next_offset": 0}
 
+    def events(self, jid, offset=0, level="", query=""):
+        job = self.job(jid)
+        return read_events(Path(job["log"]).parent / "events.jsonl", offset, level=level, query=query)
+
+    def executions(self, wid):
+        workspace = self.workspace(wid)
+        root = Path(workspace["out"]) / "executions"
+        rows = []
+        # Explicit execution IDs link CLI history; never guess a latest snapshot.
+        for path in sorted(root.glob("*/execution.json"), reverse=True)[:200]:
+            if within(path.resolve(), root.resolve()):
+                value = read_json(path)
+                rows.append({key: value.get(key) for key in ("execution_id", "experiment", "stage", "state", "started_at", "ended_at", "elapsed_seconds")})
+        for session_path in (Path(workspace["out"]) / "sessions").glob("*.json"):
+            if not within(session_path.resolve(), Path(workspace["out"]).resolve()):
+                continue
+            session = read_json(session_path)
+            for stage, record in session.get("stages", {}).items():
+                if record.get("execution_id") or not record.get("log"):
+                    continue
+                rows.append({"execution_id": "legacy-"+digest(record["log"],24), "experiment": session.get("experiment"),
+                             "stage": stage, "state": record.get("state"), "started_at": record.get("started_at"), "legacy": True})
+        return rows
+
+    def execution_events(self, wid, identifier, offset=0, level="", query=""):
+        if identifier.startswith("legacy-") and any(row["execution_id"] == identifier for row in self.executions(wid)):
+            return {"rows": [], "next_offset": 0, "has_more": False}
+        if not re.fullmatch(r"[\w-]{1,100}", identifier):
+            raise ValueError("Invalid execution ID")
+        root = Path(self.workspace(wid)["out"]) / "executions"
+        directory = root / identifier
+        if not within(directory.resolve(), root.resolve()) or not within((directory / "events.jsonl").resolve(), root.resolve()) or not (directory / "execution.json").is_file():
+            raise ValueError("Unknown execution")
+        return read_events(directory / "events.jsonl", offset, level=level, query=query)
+
+    def execution_log(self, wid, identifier, offset=0):
+        workspace = self.workspace(wid)
+        out = Path(workspace["out"]).resolve()
+        log = None
+        if identifier.startswith("legacy-"):
+            for session_path in (out / "sessions").glob("*.json"):
+                if not within(session_path.resolve(), out):
+                    continue
+                for record in read_json(session_path).get("stages", {}).values():
+                    if record.get("log") and "legacy-"+digest(record["log"],24) == identifier:
+                        log = Path(record["log"])
+        elif re.fullmatch(r"[\w-]{1,100}", identifier):
+            metadata = out / "executions" / identifier / "execution.json"
+            if within(metadata.resolve(), out) and metadata.is_file():
+                value = read_json(metadata)
+                log = Path(value["log"]) if value.get("log") else None
+        if log is None:
+            return {"text": "", "next_offset": 0}
+        if not within(log.resolve(), out) or log.suffix != ".log":
+            raise ValueError("Execution log path rejected")
+        return self.redact_data(self.preview.read(log, offset=offset), self.settings(workspace)[1].api_key)
+
     def prompt_copy(self, wid, stage, text):
         if stage not in {"discover", "merge", "review", "extract"} or len(text) > 100000:
             raise ValueError("提示词阶段或长度无效")
@@ -707,10 +790,19 @@ class Workbench:
             if any(j["state"] in ACTIVE for j in self.jobs(wid)):
                 raise Conflict("任务执行中不能切换提示词")
             w = self.workspace(wid); policy, _ = self.settings(w)
+            from .config_bundle import read_bundle
+            bundle = read_bundle(w.get("config"))
             target = self.state / "prompt-edits" / uuid.uuid4().hex[:12]
             shutil.copytree(Path(policy.get("prompt_dir") or RESOURCE / "prompts"), target / "prompts")
             (target / "prompts" / w["profile"] / f"{stage}.txt").write_text(text, encoding="utf-8")
             policy["prompt_dir"] = str(target / "prompts")
-            (target / "policy.yaml").write_text(yaml.safe_dump(policy, allow_unicode=True), encoding="utf-8")
+            # Preserve YAML stage defaults when editing only a prompt. Environment
+            # overrides still resolve through the normal settings loader.
+            frozen = {"config_version": 1, "defaults": {"policy": policy, "llm": bundle["llm"]}, "steps": {}}
+            for name, overrides in bundle["stages"].items():
+                filename = f"{name}.yaml"
+                (target / filename).write_text(yaml.safe_dump({"llm": overrides}), encoding="utf-8")
+                frozen["steps"][name] = filename
+            (target / "policy.yaml").write_text(yaml.safe_dump(frozen, allow_unicode=True), encoding="utf-8")
             w["config"] = str(target / "policy.yaml"); self._save_workspace(w)
             return self.describe(wid)

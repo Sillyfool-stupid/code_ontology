@@ -19,8 +19,12 @@ neighbor_limit: 3
 graph_nodes_per_pack: 100
 discovery_max_packs: 24
 batch_packs: 2
+discovery_strategy: auto
 merge_max_rounds: 8
 prompt_dir: null
 review_batch_items: 32
 review_max_rounds: 2
-allow_unreviewed_schema: false
+review_max_requests: 0
+review_max_seconds: 0
+review_max_tokens: 0
+allow_unreviewed_schema: true  # Legacy compatibility setting; AI review is optional.
