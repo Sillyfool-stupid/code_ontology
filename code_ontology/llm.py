@@ -122,14 +122,14 @@ class LLM:
                 started = time.monotonic()
                 emit("request_started", request_id=key, attempt=attempt, repair=repair,
                      message="模型请求已提交", artifact=str(path))
-                heartbeat = threading.Event()
-                def progress():
-                    while not heartbeat.wait(15):
-                        if not self.wait_messages:
-                            continue
-                        print(f"WAIT model stage={key[:10]} started={record['created_at']} elapsed={time.monotonic()-started:.0f}s log={path}", flush=True)
-                monitor = threading.Thread(target=progress, daemon=True)
-                monitor.start()
+                heartbeat = threading.Event() if self.wait_messages else None
+                monitor = None
+                if heartbeat is not None:
+                    def progress():
+                        while not heartbeat.wait(15):
+                            print(f"WAIT model stage={key[:10]} started={record['created_at']} elapsed={time.monotonic()-started:.0f}s log={path}", flush=True)
+                    monitor = threading.Thread(target=progress, daemon=True)
+                    monitor.start()
                 try:
                     with self.lock:
                         self.stats["requests"] += 1
@@ -175,8 +175,10 @@ class LLM:
                     if attempt >= self.settings.retries:
                         raise ModelFailure("Connection retries exhausted; inspect request log") from e
                 finally:
-                    heartbeat.set()
-                    monitor.join(timeout=1)
+                    if heartbeat is not None:
+                        heartbeat.set()
+                    if monitor is not None:
+                        monitor.join(timeout=1)
                     elapsed = round(time.monotonic() - started, 3)
                     record.update(ended_at=now(), elapsed_seconds=elapsed)
                     if "state" not in record:

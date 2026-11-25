@@ -145,6 +145,36 @@ class IntranetTests(unittest.TestCase):
             finally:
                 pipeline.close()
 
+    def test_single_local_schema_merge_is_deterministic_and_costed(self):
+        with fake_server() as (url, state):
+            settings = Settings(base_url=url, model="fixture", retries=0)
+            self.policy["batch_packs"] = 8
+            pipeline = self.pipeline(settings, "single-schema")
+            try:
+                pipeline.discover_local()
+                local_path = pipeline.output / "schema/local-manifest.json"
+                local = read_json(local_path)
+                # Exercise the valid one-candidate merge boundary independently of
+                # how the discovery planner grouped this synthetic repository.
+                local["schemas"] = local["schemas"][:1]
+                local["modules"] = {".": local["schemas"]}
+                write_json(local_path, local)
+                merge_calls = state["stage_counts"].get("merge", 0)
+                pipeline.merge_schema()
+                self.assertEqual(state["stage_counts"].get("merge", 0), merge_calls)
+                status = read_json(pipeline.output / "schema/merge-status.json")
+                self.assertEqual(status["state"], "success")
+                audit = read_json(pipeline.output / "schema/source-mapping.json")
+                self.assertTrue(audit["sources"])
+                report = read_json(pipeline.output / "schema/cost-coverage.json")
+                self.assertEqual(report["discover"]["selected_packs"], len(pipeline.packs))
+                self.assertEqual(report["merge"]["passthrough_batches"], 1)
+                self.assertEqual(report["merge"]["model_batches"], 0)
+                index = read_json(self.root / "out/experiments/single-schema/ast-general/index.json")
+                self.assertTrue(index["availability"]["coverage"])
+            finally:
+                pipeline.close()
+
     def test_local_truncation_split_and_checkpoint(self):
         self.policy["batch_packs"] = 4
         with fake_server() as (url, state):

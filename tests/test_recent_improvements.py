@@ -15,6 +15,7 @@ from code_ontology.discovery import payload, batches
 from code_ontology.events import execution, emit, read_events, redact
 from code_ontology.llm import LLM, trace_path
 from code_ontology.models import Ontology
+from code_ontology.pipeline import group_batches
 from code_ontology.review_ledger import update_ledger
 from code_ontology.schema_review import ReviewIssue
 from code_ontology.util import canonical, read_json, write_json
@@ -90,6 +91,30 @@ class RecentImprovementsTests(unittest.TestCase):
         grouped = batches(packs, 8, "system", Budget(), "general", True)
         self.assertEqual([len(group) for group in grouped], [2, 1])
         self.assertEqual({p["pack_id"] for group in grouped for p in group}, {"0", "1", "2"})
+
+    def test_merge_grouping_respects_estimated_output_budget(self):
+        class Budget:
+            def fits(self, messages):
+                return True
+        rows = [{"id": str(i), "size": 2} for i in range(5)]
+        grouped = list(group_batches(rows, "system", Budget(), lambda items: {"rows": items}, 10,
+                                     output_estimate=lambda items: sum(row["size"] for row in items),
+                                     max_output_tokens=5))
+        self.assertEqual([len(group) for group in grouped], [2, 2, 1])
+
+    def test_disabled_wait_messages_do_not_start_monitor_thread(self):
+        from types import SimpleNamespace
+        llm = LLM(Settings(base_url="http://127.0.0.1:1/v1", model="fixture", retries=0), self.root / "cache")
+        llm.wait_messages = False
+        response = SimpleNamespace(choices=[SimpleNamespace(
+            message=SimpleNamespace(content='{"ok":true}'), finish_reason="stop")], usage=None, model="fixture")
+        try:
+            with patch.object(llm.client.chat.completions, "create", return_value=response), \
+                    patch("code_ontology.llm.threading.Thread") as thread:
+                llm._request([{"role": "user", "content": "{}"}], self.root / "traces", "quiet")
+                thread.assert_not_called()
+        finally:
+            llm.close()
 
     def test_changed_scheduling_reuses_response_but_output_budget_does_not(self):
         with fake_server() as (url, state):
@@ -228,6 +253,24 @@ class RecentImprovementsTests(unittest.TestCase):
             self.assertEqual(service.execution_events(wid, legacy["execution_id"])["rows"], [])
         finally:
             service.close()
+
+    def test_experiment_index_exposes_state_and_artifact_availability(self):
+        from code_ontology.artifacts import index_experiment
+        snapshot = self.root / "out" / "snapshot-1"
+        run = snapshot / "runs/test/ast/general"
+        (run / "schema").mkdir(parents=True)
+        write_json(run / "schema/schema.json", {"classes": [], "relations": [], "properties": []})
+        write_json(run / "schema-scope.json", {"review_state": "merged_unreviewed"})
+        state = {"source_snapshot": "snapshot-1", "stages": {
+            "execution": {"state": "running"}, "merge-schema": {"state": "success"}}}
+        index_experiment(snapshot, "test", "ast", "general", state)
+        index = read_json(self.root / "out/experiments/test/ast-general/index.json")
+        self.assertEqual(index["layout_version"], 2)
+        self.assertEqual(index["overall_state"], "running")
+        self.assertEqual(index["current_stage"], "merge-schema")
+        self.assertEqual(index["review_state"], "merged_unreviewed")
+        self.assertTrue(index["availability"]["schema"])
+        self.assertFalse(index["availability"]["report"])
 
     def test_limits_dry_run_and_length_are_distinct(self):
         with fake_server(mode="truncated") as (url, state), redirect_stdout(io.StringIO()):

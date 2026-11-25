@@ -126,12 +126,20 @@ def selected_packs(packs: list[dict], limit: int):
     return selected
 
 
-def group_batches(rows: list, system: str, llm: LLM, make_payload, max_items: int):
+def group_batches(rows: list, system: str, llm: LLM, make_payload, max_items: int,
+                  output_estimate=None, max_output_tokens: int | None = None):
+    """Group requests by item count, input window and estimated response size.
+
+    The output estimate is a planning signal, not a claim about tokenizer usage.
+    A single oversized row remains visible to the normal split/recovery path.
+    """
     batch = []
     for row in rows:
         proposed = batch + [row]
         messages = [{"role": "system", "content": system}, {"role": "user", "content": canonical(make_payload(proposed))}]
-        if batch and (len(proposed) > max_items or not llm.fits(messages)):
+        output_too_large = bool(output_estimate and max_output_tokens
+                                and output_estimate(proposed) > max_output_tokens)
+        if batch and (len(proposed) > max_items or not llm.fits(messages) or output_too_large):
             yield batch
             batch = [row]
         else:
@@ -348,6 +356,12 @@ class Pipeline:
         write_json(self.output / "extraction" / "manifest.json", {"state": "partial" if self.errors else "success", "key": signature,
                    "tasks": [j["id"] for j in jobs], "schema": schema.model_dump(), "errors": self.errors,
                    "llm": dict(self.llm.stats), "elapsed_seconds": round(time.monotonic()-self.started, 3)})
+        from .artifacts import update_cost_coverage
+        update_cost_coverage(self.output / "schema", "extract", len(self.packs),
+                             state="partial" if self.errors else "success", planned_tasks=len(jobs),
+                             completed_tasks=len(results) + len(self.errors), successful_tasks=len(results),
+                             failures=len(self.errors), elapsed_seconds=round(time.monotonic()-self.started, 3),
+                             llm=dict(self.llm.stats))
         if finalize:
             self.finalize(schema, results)
         self.save_state("extract", "partial" if self.errors else "success", tasks=len(jobs), successful=len(results))
