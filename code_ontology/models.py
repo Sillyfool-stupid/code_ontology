@@ -27,6 +27,14 @@ class RelationType(Supported):
     aliases: list[str] = Field(default_factory=list)
     domain: list[str] = Field(min_length=1)
     range: list[str] = Field(min_length=1)
+    min_count: int | None = Field(default=None, ge=0)
+    max_count: int | None = Field(default=None, ge=1)
+
+    @model_validator(mode="after")
+    def cardinality(self):
+        if self.min_count is not None and self.max_count is not None and self.min_count > self.max_count:
+            raise ValueError("min_count cannot exceed max_count")
+        return self
 
 
 class PropertyType(Supported):
@@ -37,6 +45,14 @@ class PropertyType(Supported):
     domain: list[str] = Field(min_length=1)
     datatype: Literal["string", "number", "integer", "boolean"]
     unit: str | None = None
+    min_count: int | None = Field(default=None, ge=0)
+    max_count: int | None = Field(default=None, ge=1)
+
+    @model_validator(mode="after")
+    def cardinality(self):
+        if self.min_count is not None and self.max_count is not None and self.min_count > self.max_count:
+            raise ValueError("min_count cannot exceed max_count")
+        return self
 
 
 class Ontology(StrictModel):
@@ -102,6 +118,10 @@ class Attribute(Supported):
     value: str | float | int | bool
     unit: str | None = None
     basis: Basis
+    condition: str | None = None
+    effective_time: str | None = None
+    valid_from: str | None = None
+    valid_to: str | None = None
 
 
 class Rule(Supported):
@@ -110,6 +130,7 @@ class Rule(Supported):
     action: str
     scope: Scope
     basis: Basis
+    effective_time: str | None = None
 
 
 class Candidate(StrictModel):

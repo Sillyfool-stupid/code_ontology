@@ -33,6 +33,22 @@ class RecentImprovementsTests(unittest.TestCase):
     def tearDown(self):
         self.temp.cleanup()
 
+    def test_optional_review_connection_is_isolated_and_secret_free(self):
+        self.env.write_text("OPENAI_BASE_URL=http://shared/v1\nOPENAI_API_KEY=shared-secret\nOPENAI_MODEL=shared\n"
+                            "OPENAI_REVIEW_BASE_URL=http://review/v1\nOPENAI_REVIEW_API_KEY=review-secret\n"
+                            "OPENAI_REVIEW_MODEL=reviewer\n", encoding="utf-8")
+        settings = load_settings(str(self.env))
+        discover = settings.for_stage("discover")
+        review = settings.for_stage("review")
+        self.assertEqual((discover.base_url, discover.model, discover.api_key),
+                         ("http://shared/v1", "shared", "shared-secret"))
+        self.assertEqual((review.base_url, review.model, review.api_key),
+                         ("http://review/v1", "reviewer", "review-secret"))
+        self.assertNotIn("secret", json.dumps(settings.public()))
+        before = discover.request_identity()
+        settings.review_model = "changed-reviewer"
+        self.assertEqual(settings.for_stage("discover").request_identity(), before)
+
     def test_bundle_paths_precedence_and_secret_rejection(self):
         (self.root / "steps").mkdir()
         (self.root / "steps/discover.yaml").write_text("policy:\n  batch_packs: 8\nllm:\n  concurrency: 4\n  temperature: 0.8\n", encoding="utf-8")

@@ -253,19 +253,25 @@ class BaselineTests(unittest.TestCase):
                 {"id": "device", "name": "设备", "definition": "设备", "evidence_ids": [ev]},
                 {"id": "pump", "name": "泵", "definition": "泵设备", "parents": ["device"], "evidence_ids": [ev]}],
                 relations=[{"id": "r", "name": "关联", "definition": "关联", "domain": ["device"], "range": ["device"], "evidence_ids": [ev]}],
-                properties=[{"id": "p", "name": "温度", "definition": "温度", "domain": ["device"], "datatype": "number", "unit": "C", "evidence_ids": [ev]}])
+                properties=[{"id": "p", "name": "温度", "definition": "温度", "domain": ["device"], "datatype": "number", "unit": "C", "evidence_ids": [ev]},
+                            {"id": "status", "name": "状态", "definition": "单值状态", "domain": ["device"], "datatype": "string", "max_count": 1, "evidence_ids": [ev]}])
             entity = {"id": "e", "name": "示例泵", "type_id": "pump", "scope": "example", "basis": "direct", "evidence_ids": [ev]}
             result = Extraction(entities=[entity],
                 relations=[{"subject": "e", "relation_id": "r", "object": "e", "basis": "direct", "evidence_ids": [ev]}],
-                attributes=[{"subject": "e", "property_id": "p", "value": value, "unit": "C", "basis": "direct", "evidence_ids": [ev]} for value in (85, 90, "not_a_number")],
-                rules=[{"name": "超温规则", "condition": "temperature > 85", "action": "return 1", "scope": "code_definition", "basis": "direct", "evidence_ids": [ev]}])
+                attributes=[*[{"subject": "e", "property_id": "p", "value": value, "unit": "C", "basis": "direct", "evidence_ids": [ev]} for value in (85, 90, "not_a_number")],
+                            {"subject": "e", "property_id": "status", "value": "ready", "basis": "direct", "condition": "enabled", "valid_from": "configuration start", "evidence_ids": [ev]},
+                            {"subject": "e", "property_id": "status", "value": "stopped", "basis": "direct", "condition": "disabled", "evidence_ids": [ev]}],
+                rules=[{"name": "超温规则", "condition": "temperature > 85", "action": "return 1", "scope": "code_definition", "basis": "direct", "effective_time": "during check", "evidence_ids": [ev]}])
             pipeline.finalize(schema, [result]); pipeline.close()
             metrics = read_json(pipeline.output / "metrics.json")
             self.assertEqual(metrics["relations"], 1)
-            self.assertEqual(metrics["attributes"], 2)
+            self.assertEqual(metrics["attributes"], 3)
             self.assertEqual(metrics["rules"], 1)
             self.assertEqual(metrics["conflicts"], 1)
-            self.assertEqual(metrics["candidates"], 1)
+            self.assertEqual(metrics["candidates"], 2)
+            status = [row for row in iter_jsonl(pipeline.output / "final/attributes.jsonl") if row["property_id"] == "status"]
+            self.assertEqual(status[0]["condition"], "enabled")
+            self.assertEqual(status[0]["valid_from"], "configuration start")
 
     def test_cli_stage_commands_and_streaming_array_import(self):
         self.graph()

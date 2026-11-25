@@ -28,26 +28,43 @@ class Settings:
     joern_home: str = ""
     ca_bundle: str = ""
     thinking: str = "auto"
+    review_base_url: str = ""
+    review_api_key: str = ""
+    review_model: str = ""
+    review_ca_bundle: str = ""
     stage_overrides: dict = field(default_factory=dict)
 
     def for_stage(self, stage):
-        result = replace(self, **self.stage_overrides.get(stage, {}), stage_overrides={})
+        connection = {}
+        if stage == "review":
+            connection = {key: value for key, value in {
+                "base_url": self.review_base_url, "api_key": self.review_api_key,
+                "model": self.review_model, "ca_bundle": self.review_ca_bundle,
+            }.items() if value}
+        values = {**connection, **self.stage_overrides.get(stage, {}), "stage_overrides": {},
+                  "review_base_url": "", "review_api_key": "", "review_model": "", "review_ca_bundle": ""}
+        # Apply the selected review connection after clearing helper fields.
+        values.update(connection)
+        result = replace(self, **values)
         validate_settings(result)
         return result
 
     def public(self):
         data = asdict(self)
         data.pop("api_key")
+        data.pop("review_api_key")
         # Endpoint may contain embedded credentials. Never persist URL query or user info.
         from urllib.parse import urlsplit, urlunsplit
-        u = urlsplit(data["base_url"])
-        data["base_url"] = urlunsplit((u.scheme, u.netloc.rsplit("@", 1)[-1], u.path, "", ""))
+        for field in ("base_url", "review_base_url"):
+            u = urlsplit(data[field])
+            data[field] = urlunsplit((u.scheme, u.netloc.rsplit("@", 1)[-1], u.path, "", ""))
         return data
 
     def request_identity(self):
         """Response semantics and transport capacity, excluding local scheduling."""
         data = self.public()
-        for key in ("timeout", "retries", "concurrency", "joern_home", "ca_bundle", "stage_overrides"):
+        for key in ("timeout", "retries", "concurrency", "joern_home", "ca_bundle", "stage_overrides",
+                    "review_base_url", "review_model", "review_ca_bundle"):
             data.pop(key, None)
         return data
 
@@ -78,6 +95,10 @@ def load_settings(env_file: str | None = None, policy_file: str | None = None) -
         "joern_home": ("JOERN_HOME", str), "ca_bundle": ("LLM_CA_BUNDLE", str),
         "thinking": ("LLM_THINKING", str),
         "send_max_tokens": ("LLM_SEND_MAX_TOKENS", parse_bool),
+        "review_base_url": ("OPENAI_REVIEW_BASE_URL", str),
+        "review_api_key": ("OPENAI_REVIEW_API_KEY", str),
+        "review_model": ("OPENAI_REVIEW_MODEL", str),
+        "review_ca_bundle": ("LLM_REVIEW_CA_BUNDLE", str),
     }
     result = Settings(**{**bundle["llm"], **{k: cast(values[key]) for k, (key, cast) in mapping.items() if values.get(key) not in (None, "")}})
     for stage in ("discover", "merge", "review", "extract"):

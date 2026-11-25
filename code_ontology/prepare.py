@@ -8,6 +8,11 @@ from .joern import EDGE_SETS, database
 from .repository import SOURCE_EXTENSIONS, stage_state, verify_sources
 from .util import canonical, digest, file_hash, iter_jsonl, read_json, token_bound, write_json, write_jsonl
 
+PREPARE_FORMAT = 2
+STRUCTURAL_LABELS = {"FILE", "NAMESPACE_BLOCK", "TYPE_DECL", "METHOD", "METHOD_PARAMETER_IN", "METHOD_RETURN", "MEMBER", "LOCAL"}
+BEHAVIOR_LABELS = {"CALL", "CONTROL_STRUCTURE", "RETURN", "IDENTIFIER", "LITERAL", "FIELD_IDENTIFIER", "BLOCK"}
+SEMANTIC_EDGE_LABELS = {"CALL", "REF", "INHERITS_FROM", "EVAL_TYPE", "CFG", "CDG", "REACHING_DEF"}
+
 
 def chunks(text: str, start: int, budget: int):
     """Split along source lines; oversized single lines use fragments with the same line range."""
@@ -101,10 +106,11 @@ def prepare(dest: Path, view: str, policy: dict):
     parse_report = read_json(dest / "raw/tree-sitter/parse_report.json") if info["backend"] == "tree-sitter" else {}
     if not (dest / "normalized" / view / "index.json").exists():
         raise ValueError(f"View {view} not exported; run parse --views {view}")
+    graph_index = read_json(dest / "normalized" / view / "index.json")
     key = digest({"source": manifest["snapshot_id"], "view": view,
                   "policy": {k: policy[k] for k in ("pack_tokens", "neighbor_limit", "graph_nodes_per_pack")},
-                  "graph": read_json(dest / "normalized" / view / "index.json").get("graph_fingerprint"),
-                  "implementation": file_hash(Path(__file__)), "format": 1})
+                  "graph": graph_index.get("graph_fingerprint"),
+                  "implementation": file_hash(Path(__file__)), "format": PREPARE_FORMAT})
     directory = dest / "prepared" / view
     stage_state(dest, f"prepare:{view}", "running")
     try:
@@ -119,7 +125,23 @@ def prepare(dest: Path, view: str, policy: dict):
         files = {r["file"]: r for r in manifest["files"]}
         skipped = []
         count, truncations = 0, 0
+        layer_counts = {"layered": 0, "source_only_fallback": 0}
         with database(dest) as db:
+            actual_edge_labels = {row[0] for row in db.execute("SELECT DISTINCT label FROM edges")}
+            exported_edge_labels = set(graph_index.get("edge_labels", []))
+            available_edge_labels = sorted(actual_edge_labels.intersection(exported_edge_labels))
+            semantic_available = sorted(SEMANTIC_EDGE_LABELS.intersection(available_edge_labels))
+            capabilities = {
+                "backend": info["backend"], "view": view,
+                "ast": "AST" in available_edge_labels,
+                "cfg": "CFG" in available_edge_labels,
+                "cpg": view == "cpg" and bool(set(semantic_available) - {"AST"}),
+                "available_edge_labels": available_edge_labels,
+                "semantic_edge_labels": semantic_available,
+                "missing_semantic_edge_labels": sorted(SEMANTIC_EDGE_LABELS - set(semantic_available)),
+                "note": ("Tree-sitter provides syntax AST only; no CFG/CPG or resolved calls are claimed"
+                         if info["backend"] == "tree-sitter" else "Capabilities reflect edges present in this exported snapshot"),
+            }
             def node(nid):
                 row = db.execute("SELECT data FROM nodes WHERE id=?", (nid,)).fetchone()
                 return json.loads(row[0]) if row else None
@@ -228,6 +250,17 @@ def prepare(dest: Path, view: str, policy: dict):
                                 "source_scope": scope, "kind": symbol["kind"], "name": symbol.get("NAME", ""),
                                 "signature": symbol.get("SIGNATURE", ""), "code": code,
                                 "context": {"nodes": graph_nodes, "edges": graph_edges, "neighbors": neighbors},
+                                "evidence_layers": {
+                                    "structural_skeleton": {"node_ids": [n["id"] for n in graph_nodes if n["label"] in STRUCTURAL_LABELS]},
+                                    "behavior_evidence": {"node_ids": [n["id"] for n in graph_nodes if n["label"] in BEHAVIOR_LABELS],
+                                                          "edge_labels": sorted({e["label"] for e in graph_edges if e["label"] != "AST"})},
+                                    "semantic_slice": {"bounded": True,
+                                                       "edge_labels": sorted({n["edge"]["label"] for n in neighbors}),
+                                                       "neighbor_ids": [n["target"]["id"] for n in neighbors],
+                                                       "limit": policy["neighbor_limit"]},
+                                    "capabilities": capabilities,
+                                    "fallback": "layered_graph_context",
+                                },
                                 "parse_warnings": warning}
                         if Path(file).name == "CMakeLists.txt" or Path(file).suffix == ".cmake":
                             pack["context"]["cmake_declarations"] = cmake_declarations(code)
@@ -238,6 +271,7 @@ def prepare(dest: Path, view: str, policy: dict):
                             omitted += 1
                         if token_bound(pack) > policy["pack_tokens"]:
                             pack["context"] = {}
+                            pack["evidence_layers"]["fallback"] = "source_only_budget_fallback"
                         if omitted:
                             pack["parse_warnings"].append("input_budget: graph context reduced; full raw graph retained")
                             truncations += 1
@@ -246,12 +280,15 @@ def prepare(dest: Path, view: str, policy: dict):
                             pack["context"]["edges"] = [e for e in pack["context"]["edges"] if removed["id"] not in (e["src"], e["dst"])]
                         if token_bound(pack) > policy["pack_tokens"]:
                             pack["context"] = {}
+                            pack["evidence_layers"]["fallback"] = "source_only_budget_fallback"
                         if token_bound(pack) > policy["pack_tokens"]:
                             raise ValueError(f"pack_tokens too small for source and metadata ({file}:{a}, {symbol.get('NAME')}, bytes={token_bound(pack)}, fields={[(k, token_bound(v)) for k,v in pack.items()]}); increase it")
                         count += 1
+                        layer_counts["source_only_fallback" if not pack["context"] else "layered"] += 1
                         yield pack
             write_jsonl(directory / "packs.jsonl", records())
-        write_json(directory / "index.json", {"key": key, "packs": count, "context_truncations": truncations,
+        write_json(directory / "index.json", {"key": key, "format": PREPARE_FORMAT, "packs": count,
+                   "context_truncations": truncations, "layer_coverage": layer_counts, "capabilities": capabilities,
                    "skipped_symbols": skipped, "token_estimator": "UTF-8 byte upper bound", "view": view})
         stage_state(dest, f"prepare:{view}", "success", packs=count)
         return directory / "packs.jsonl"

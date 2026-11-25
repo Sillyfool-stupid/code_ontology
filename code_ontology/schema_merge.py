@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 from copy import deepcopy
+from collections import defaultdict
 from typing import Literal
 
 from pydantic import Field
@@ -10,7 +11,7 @@ from .models import Ontology, StrictModel, supported_ids
 from .util import canonical, digest
 
 CATEGORIES = ("classes", "relations", "properties")
-MERGE_FORMAT = 2
+MERGE_FORMAT = 3
 
 
 class SourceMapping(StrictModel):
@@ -124,6 +125,9 @@ def alignment_findings(result, payload):
                 if mapped is None or mapped not in ancestors(target.id):
                     issue(sid, "loses its parent class")
         else:
+            if (row.get("min_count"), row.get("max_count")) != (target.min_count, target.max_count):
+                issue(sid, f"changes explicit cardinality: input={row.get('min_count')}/{row.get('max_count')}; "
+                           f"target={target.min_count}/{target.max_count}")
             mapped_refs(row["domain"], target.domain, sid, "domain")
             if category == "relations":
                 mapped_refs(row["range"], target.range, sid, "range/direction")
@@ -227,3 +231,111 @@ def final_mapping(candidate, registry):
     if resolved.keys() != registry.keys():
         raise ValueError("Cross-round provenance lost or invented original sources")
     return [{**registry[sid], **resolved[sid]} for sid in sorted(registry)]
+
+
+def semantic_signatures(schema):
+    """Create ID-independent structural signatures for conservative registry lookup."""
+    data = Ontology.model_validate(schema).model_dump()
+    class_keys = {row["id"]: digest([row["name"].casefold(), row["definition"].strip(), sorted(a.casefold() for a in row["aliases"])], 24)
+                  for row in data["classes"]}
+    result = {}
+    for category in CATEGORIES:
+        for row in data[category]:
+            value = {k: v for k, v in row.items() if k not in {"id", "evidence_ids"}}
+            for field in ("parents", "domain", "range"):
+                if field in value:
+                    value[field] = sorted(class_keys.get(x, "missing:" + x) for x in value[field])
+            result[(category, row["id"])] = digest([category, value], 40)
+    return result
+
+
+def registry_candidates(schemas, previous=None):
+    """Retrieve exact and lexical candidates without deciding semantic equivalence."""
+    previous = previous or {"entries": []}
+    exact = defaultdict(list)
+    lexical = defaultdict(list)
+    for entry in previous.get("entries", []):
+        exact[(entry["category"], entry["semantic_signature"])].append(entry["registry_id"])
+        for name in entry.get("names", []):
+            lexical[(entry["category"], name.casefold())].append(entry["registry_id"])
+    rows = []
+    for schema_index, schema in enumerate(schemas):
+        data = Ontology.model_validate(schema).model_dump()
+        signatures = semantic_signatures(data)
+        for category in CATEGORIES:
+            for row in data[category]:
+                signature = signatures[(category, row["id"])]
+                names = [row["name"], *row.get("aliases", [])]
+                exact_ids = sorted(set(exact[(category, signature)]))
+                lexical_ids = sorted({rid for name in names for rid in lexical[(category, name.casefold())]})
+                rows.append({"schema_index": schema_index, "category": category, "source_id": row["id"],
+                             "semantic_signature": signature, "exact_registry_ids": exact_ids,
+                             "candidate_registry_ids": sorted(set(exact_ids + lexical_ids)),
+                             "decision": "exact_reuse_candidate" if exact_ids else "model_or_unresolved"})
+    return {"format": MERGE_FORMAT, "entries": rows,
+            "exact_candidates": sum(bool(row["exact_registry_ids"]) for row in rows),
+            "note": "Names only retrieve candidates; they never prove identity. Exact signatures may be reused only with current-source mapping and validation."}
+
+
+def build_concept_registry(schema, source_mapping, snapshot_id, previous=None):
+    """Materialize stable registry IDs while retaining the current schema and lineage."""
+    data = Ontology.model_validate(schema).model_dump()
+    signatures = semantic_signatures(data)
+    previous_by_key = {(e["category"], e["semantic_signature"]): e for e in (previous or {}).get("entries", [])}
+    roots = defaultdict(list)
+    for row in source_mapping:
+        if row.get("target_id"):
+            roots[row["target_id"]].append(row["source_id"])
+    entries = []
+    for category in CATEGORIES:
+        for row in data[category]:
+            signature = signatures[(category, row["id"])]
+            old = previous_by_key.get((category, signature), {})
+            registry_id = old.get("registry_id") or "reg_" + digest([category, signature], 32)
+            entries.append({"registry_id": registry_id, "category": category, "semantic_signature": signature,
+                            "current_id": row["id"], "names": sorted(set([row["name"], *row.get("aliases", [])])),
+                            "evidence_ids": sorted(row["evidence_ids"]), "source_ids": sorted(roots[row["id"]]),
+                            "first_snapshot": old.get("first_snapshot", snapshot_id), "latest_snapshot": snapshot_id})
+    return {"format": MERGE_FORMAT, "snapshot_id": snapshot_id, "schema_hash": digest(data),
+            "entries": sorted(entries, key=lambda e: (e["category"], e["registry_id"]))}
+
+
+def split_candidate_components(candidate, max_items):
+    """Split only disconnected schema components; never duplicate dependency anchors."""
+    schema = Ontology.model_validate(candidate["schema"]).model_dump()
+    total = sum(len(schema[c]) for c in CATEGORIES)
+    if total <= max_items:
+        return [candidate]
+    adjacency = defaultdict(set)
+    category_by_id = {}
+    rows_by_id = {}
+    for category in CATEGORIES:
+        for row in schema[category]:
+            category_by_id[row["id"]] = category
+            rows_by_id[row["id"]] = row
+            adjacency[row["id"]]
+    for row in schema["classes"]:
+        for ref in row["parents"]:
+            adjacency[row["id"]].add(ref); adjacency[ref].add(row["id"])
+    for category in ("relations", "properties"):
+        for row in schema[category]:
+            for ref in row["domain"] + (row["range"] if category == "relations" else []):
+                adjacency[row["id"]].add(ref); adjacency[ref].add(row["id"])
+    components, remaining = [], set(rows_by_id)
+    while remaining:
+        pending = [min(remaining)]; found = set()
+        while pending:
+            item = pending.pop()
+            if item in found:
+                continue
+            found.add(item); pending.extend(adjacency[item] - found)
+        remaining -= found; components.append(found)
+    if len(components) == 1:
+        return [candidate]
+    result = []
+    for number, ids in enumerate(sorted(components, key=lambda c: min(c))):
+        part = {**schema, **{category: [row for row in schema[category] if row["id"] in ids] for category in CATEGORIES}}
+        Ontology.model_validate(part)
+        result.append({"schema": part, "lineage": {item_id: roots for item_id, roots in candidate["lineage"].items() if item_id in ids},
+                       "pending": list(candidate["pending"]) if number == 0 else []})
+    return result

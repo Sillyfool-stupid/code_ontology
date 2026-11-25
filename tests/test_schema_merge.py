@@ -5,7 +5,8 @@ import unittest
 from code_ontology.models import Extraction, Ontology
 from code_ontology.schema_merge import (MergeResponse, canonical_merge, coalesce, compose,
                                        final_mapping, initial_candidates, merge_payload, validate_merge, retain_missing_sources,
-                                       retain_source_metadata)
+                                       retain_source_metadata, build_concept_registry, registry_candidates,
+                                       split_candidate_components)
 
 
 def schema():
@@ -29,6 +30,34 @@ def renamed_response(payload):
 
 
 class SchemaMergeTests(unittest.TestCase):
+    def test_registry_reuses_only_exact_semantic_signatures(self):
+        raw = schema()
+        mapping = [{"source_id": row["id"], "target_id": row["id"]}
+                   for category in ("classes", "relations", "properties") for row in raw[category]]
+        first = build_concept_registry(raw, mapping, "snapshot-a")
+        again = build_concept_registry(raw, mapping, "snapshot-b", first)
+        self.assertEqual([e["registry_id"] for e in first["entries"]], [e["registry_id"] for e in again["entries"]])
+        candidates = registry_candidates([raw], first)
+        self.assertEqual(candidates["exact_candidates"], len(first["entries"]))
+        changed = deepcopy(raw)
+        changed["properties"][0]["definition"] = "Different business meaning"
+        changed_candidates = registry_candidates([changed], first)
+        duration = next(row for row in changed_candidates["entries"] if row["source_id"] == "duration")
+        self.assertEqual(duration["exact_registry_ids"], [])
+        self.assertTrue(duration["candidate_registry_ids"])
+
+    def test_dependency_components_split_without_duplicate_anchors(self):
+        raw = schema()
+        raw["classes"].append({"id": "isolated", "name": "Isolated", "definition": "Independent concept", "evidence_ids": ["ev2"]})
+        candidates, _ = initial_candidates([raw])
+        parts = split_candidate_components(candidates[0], 2)
+        self.assertEqual(len(parts), 2)
+        ids = [{row["id"] for category in ("classes", "relations", "properties") for row in part["schema"][category]} for part in parts]
+        self.assertFalse(ids[0].intersection(ids[1]))
+        self.assertEqual(set().union(*ids), {"device", "task", "hasTask", "duration", "isolated"})
+        connected = split_candidate_components(initial_candidates([schema()])[0][0], 1)
+        self.assertEqual(len(connected), 1)
+
     def test_rename_and_canonicalization_preserve_all_categories(self):
         payload, _ = merge_payload([schema()], "general")
         response = canonical_merge(renamed_response(payload), payload, "general")
@@ -66,6 +95,19 @@ class SchemaMergeTests(unittest.TestCase):
                 response.ontology.properties[0].unit = "s"
             with self.subTest(change=change), self.assertRaises(ValueError):
                 validate_merge(response, payload)
+
+    def test_explicit_cardinality_is_validated_and_preserved(self):
+        raw = schema()
+        raw["relations"][0]["max_count"] = 1
+        payload, _ = merge_payload([raw], "general")
+        response = renamed_response(payload)
+        response.ontology.relations[0].max_count = None
+        with self.assertRaisesRegex(ValueError, "cardinality"):
+            validate_merge(response, payload)
+        raw["properties"][0]["min_count"] = 2
+        raw["properties"][0]["max_count"] = 1
+        with self.assertRaisesRegex(ValueError, "min_count"):
+            Ontology.model_validate(raw)
 
     def test_same_name_different_meanings_have_distinct_ids(self):
         raw = schema()
