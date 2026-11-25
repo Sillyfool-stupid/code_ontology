@@ -318,42 +318,68 @@ class Pipeline:
         chosen = {r.id for col in (best.classes, best.relations, best.properties) for r in col}
         return best, sorted(all_ids - chosen)
 
+    def extraction_batches(self, schema, system):
+        """Greedy count cap; never drop schema items just to fit more packs."""
+        limit = self.policy.get("extract_batch_packs", 1)
+        batch = []
+        for pack in self.packs:
+            proposed = batch + [pack]
+            if batch and (len(proposed) > limit or not self.llm.fits([
+                    {"role": "system", "content": system},
+                    {"role": "user", "content": canonical({"stage": "extract", "schema": schema.model_dump(), "packs": proposed})}])):
+                yield batch
+                batch = []
+            batch.append(pack)
+        if batch:
+            yield batch
+
+    @staticmethod
+    def extraction_validator(batch, parent=None):
+        allowed = {eid for pack in batch for eid in pack["evidence_ids"]}
+
+        def validator(result):
+            found = {eid for category in (result.entities, result.relations, result.attributes, result.rules)
+                     for row in category for eid in row.evidence_ids}
+            if found - allowed:
+                raise ValueError("Extraction references evidence outside this task: " + canonical(sorted(found - allowed)) +
+                                 ". Use only this task's evidence IDs: " + canonical(sorted(allowed)) +
+                                 ". The fixed schema's evidence IDs describe type provenance, not evidence for this extraction. "
+                                 "Keep an assertion only if the current batch's code supports it; otherwise remove it.")
+            if parent:
+                parent(result)
+        return validator
+
     def extract(self, schema: Ontology, finalize=True):
         self.save_state("extract", "running")
         system = prompt(self.policy, self.profile, "extract")
         jobs, selection = [], []
         signature = self.extraction_fingerprint(schema)
-        # Start with one pack to keep fixed-schema budget handling deterministic.
-        for pack in self.packs:
+        for batch in self.extraction_batches(schema, system):
+            pack_ids = [pack["pack_id"] for pack in batch]
+            allowed = {eid for pack in batch for eid in pack["evidence_ids"]}
             try:
-                sub, omitted = self.extraction_schema(schema, [pack], system)
+                sub, omitted = self.extraction_schema(schema, batch, system)
             except BudgetError as exc:
-                failure = {"stage": "extract", "task_id": digest(pack["pack_id"]), "state": "failed",
-                           "packs": [pack["pack_id"]], "evidence_ids": pack["evidence_ids"], "error": str(exc)}
+                failure = {"stage": "extract", "task_id": digest(pack_ids[0] if len(pack_ids) == 1 else pack_ids), "state": "failed",
+                           "packs": pack_ids, "evidence_ids": sorted(allowed), "error": str(exc)}
                 self.errors.append(failure)
                 write_json(self.output / "extraction" / f"{failure['task_id']}.failed.json", failure)
-                selection.append({"task_id": failure["task_id"], "packs": [pack["pack_id"]], "state": "budget_failed"})
+                selection.append({"task_id": failure["task_id"], "packs": pack_ids, "state": "budget_failed"})
                 continue
-            payload = {"stage": "extract", "schema": sub.model_dump(), "packs": [pack]}
-            tid = digest([pack["pack_id"], digest(sub.model_dump())])
-            selection.append({"task_id": tid, "packs": [pack["pack_id"]], "omitted_schema_ids": omitted})
-            allowed = set(pack["evidence_ids"])
-
-            def validator(result, allowed=allowed):
-                found = {eid for category in (result.entities, result.relations, result.attributes, result.rules) for row in category for eid in row.evidence_ids}
-                if found - allowed:
-                    raise ValueError("Extraction references evidence outside this task: " + canonical(sorted(found - allowed)) +
-                                     ". Use only this pack's evidence IDs: " + canonical(sorted(allowed)) +
-                                     ". The fixed schema's evidence IDs describe type provenance, not evidence for this extraction. "
-                                     "Keep an assertion only if the current pack's code supports it; otherwise remove it.")
-
+            payload = {"stage": "extract", "schema": sub.model_dump(), "packs": batch}
+            tid = digest([pack_ids[0] if len(pack_ids) == 1 else pack_ids, digest(sub.model_dump())])
+            selection.append({"task_id": tid, "packs": pack_ids, "omitted_schema_ids": omitted})
+            validator = self.extraction_validator(batch)
             jobs.append({"id": tid, "evidence_ids": list(allowed), "path": self.output / "extraction" / f"{tid}.json",
                          "call": lambda payload=payload, validator=validator: self.extract_task(system, payload, validator)})
         write_json(self.output / "extraction" / "selection.json", selection)
+        print(f"EXTRACT packs={len(self.packs)} batch_limit={self.policy.get('extract_batch_packs', 1)} tasks={len(jobs)}", flush=True)
         write_json(self.output / "extraction" / "manifest.json", {"state": "running", "key": signature,
+                   "batch_packs": self.policy.get("extract_batch_packs", 1), "total_packs": len(self.packs),
                    "tasks": [j["id"] for j in jobs], "schema": schema.model_dump()})
         results = self.execute_jobs("extract", jobs)
         write_json(self.output / "extraction" / "manifest.json", {"state": "partial" if self.errors else "success", "key": signature,
+                   "batch_packs": self.policy.get("extract_batch_packs", 1), "total_packs": len(self.packs),
                    "tasks": [j["id"] for j in jobs], "schema": schema.model_dump(), "errors": self.errors,
                    "llm": dict(self.llm.stats), "elapsed_seconds": round(time.monotonic()-self.started, 3)})
         from .artifacts import update_cost_coverage
@@ -370,7 +396,8 @@ class Pipeline:
 
     def extraction_fingerprint(self, schema):
         return digest({"packs": self.packs, "schema": schema.model_dump(), "prompt": prompt(self.policy, self.profile, "extract"),
-                       "settings": self.settings.for_stage("extract").public(), "recovery": self.policy["recovery_max_depth"]})
+                       "settings": self.settings.for_stage("extract").public(), "recovery": self.policy["recovery_max_depth"],
+                       **({"extract_batch_packs": self.policy["extract_batch_packs"]} if self.policy.get("extract_batch_packs", 1) != 1 else {})})
 
     def extract_task(self, system, payload, validator, depth=0):
         recovery_key = digest({"payload": payload, "system": system, "settings": self.settings.for_stage("extract").public()})
@@ -381,16 +408,24 @@ class Pipeline:
             return self.llm.call(system, payload, Extraction, self.output / "llm_requests", validator, self.namespace)
         except BudgetError:
             write_json(recovery, {"state": "needs_split", "key": recovery_key})
-            code = payload["packs"][0]["code"]
-            if depth >= self.policy["recovery_max_depth"] or len(code) < 80:
+            packs = payload["packs"]
+            if depth >= self.policy["recovery_max_depth"]:
                 raise
-            cut = code.find("\n", len(code)//2)
-            cut = cut+1 if 0 <= cut < len(code)-1 else len(code)//2
+            if len(packs) > 1:
+                middle = len(packs) // 2
+                children = [packs[:middle], packs[middle:]]
+            else:
+                code = packs[0]["code"]
+                if len(code) < 80:
+                    raise
+                cut = code.find("\n", len(code)//2)
+                cut = cut+1 if 0 <= cut < len(code)-1 else len(code)//2
+                children = [[{**packs[0], "code": fragment, "context": {}, "fragment_of": packs[0]["pack_id"]}]
+                            for fragment in (code[:cut], code[cut:])]
             combined = {k: [] for k in ("entities", "relations", "attributes", "rules", "candidates")}
-            for index, fragment in enumerate((code[:cut], code[cut:])):
-                pack = {**payload["packs"][0], "code": fragment, "context": {},
-                        "fragment_of": payload["packs"][0]["pack_id"]}
-                result = self.extract_task(system, {**payload, "packs": [pack]}, validator, depth+1).model_dump()
+            for index, child in enumerate(children):
+                child_validator = self.extraction_validator(child, validator)
+                result = self.extract_task(system, {**payload, "packs": child}, child_validator, depth+1).model_dump()
                 remap = {r["id"]: f"part{index}_{r['id']}" for r in result["entities"]}
                 for row in result["entities"]:
                     row["id"] = remap[row["id"]]

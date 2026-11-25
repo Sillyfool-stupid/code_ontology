@@ -15,6 +15,7 @@ from .schema_merge import (MERGE_FORMAT, MergeResponse, canonical_merge, coalesc
 from .util import canonical, digest, now, read_json, token_bound, unique, write_json, write_jsonl
 from .events import emit
 from .discovery import payload as discovery_payload, batches as discovery_batches
+from . import ast_discovery
 from .artifacts import update_cost_coverage
 
 
@@ -40,6 +41,11 @@ class SchemaStages:
         configured = pipeline.policy.get("discovery_strategy", "auto")
         self.strategy = (previous.get("strategy", "legacy") if previous else "budget") if configured == "auto" else configured
         self.legacy_local = None
+
+    def discovery_input(self, packs):
+        if self.strategy == "ast-01":
+            return ast_discovery.payload(packs, self.p.profile)
+        return discovery_payload(packs, self.p.profile, self.strategy == "budget")
 
     def close(self):
         self.p.stage_stats.append(dict(self.llm.stats))
@@ -140,7 +146,7 @@ class SchemaStages:
     def recover(self, packs, depth=0):
         """Split a truncated local request. A fragment retains its original evidence anchor."""
         try:
-            return [self.call(discovery_payload(packs, self.p.profile, self.strategy == "budget"))]
+            return [self.call(self.discovery_input(packs))]
         except BudgetError:
             if depth >= self.p.policy["recovery_max_depth"]:
                 raise
@@ -177,17 +183,26 @@ class SchemaStages:
 
     def local(self):
         from .pipeline import selected_packs
+        if self.strategy == "ast-01" and self.p.view != "ast":
+            raise ValueError("AST-01 requires --view ast; use budget/legacy for CFG/CPG")
         selected = selected_packs(self.p.packs, self.p.policy["discovery_max_packs"])
         chosen = {p["pack_id"] for p in selected}
         write_json(self.root / "selection.json", {"selected": sorted(chosen), "total": len(self.p.packs),
                    "unselected": [p["pack_id"] for p in self.p.packs if p["pack_id"] not in chosen]})
         size = self.p.policy["batch_packs"]
         # Group by module to keep local inputs related. Input overflows enter the same split path.
-        batches = discovery_batches(selected, size, self.system, self.llm, self.p.profile, self.strategy == "budget")
-        fingerprint = digest({"packs": self.p.packs, "selected": sorted(chosen), "prompt": self.system,
+        if self.strategy == "ast-01":
+            batches = ast_discovery.batches(selected, size, self.system, self.llm, self.p.profile)
+            write_json(self.root / "ast-01-input-report.json", ast_discovery.input_report(batches, self.p.profile))
+        else:
+            batches = discovery_batches(selected, size, self.system, self.llm, self.p.profile, self.strategy == "budget")
+        identity = {"packs": self.p.packs, "selected": sorted(chosen), "prompt": self.system,
                               "settings": self.settings.request_identity(), "batch_size": size,
                               "strategy": self.strategy, "protocol": 2,
-                              "recovery_depth": self.p.policy["recovery_max_depth"]}, 40)
+                              "recovery_depth": self.p.policy["recovery_max_depth"]}
+        if self.strategy == "ast-01":
+            identity["ast_01_format"] = ast_discovery.FORMAT
+        fingerprint = digest(identity, 40)
         write_json(self.root / "local-tasks.json", {"key": fingerprint, "strategy": self.strategy,
                    "batches": [[p["pack_id"] for p in batch] for batch in batches]})
         write_json(self.root / "local-manifest.json", {"state": "running", "key": fingerprint,
@@ -237,6 +252,8 @@ class SchemaStages:
                     "schemas": schemas, "modules": {k: sorted(unique(v), key=canonical) for k,v in sorted(module_results.items())},
                     "errors": self.errors, "ended_at": now(), "elapsed_seconds": round(time.monotonic()-started, 3),
                     "performance": dict(self.llm.stats)}
+        if self.strategy == "ast-01":
+            manifest["ast_01_format"] = ast_discovery.FORMAT
         write_json(self.root / "local-manifest.json", manifest)
         update_cost_coverage(self.root, "discover", len(self.p.packs), state=manifest["state"],
                              selected_packs=len(chosen), unselected_packs=len(self.p.packs)-len(chosen),
@@ -265,11 +282,14 @@ class SchemaStages:
                            "recovery_depth": self.p.policy["recovery_max_depth"]}
         if local.get("protocol") == 2:
             identity.update(settings=saved_settings.request_identity(), strategy=local["strategy"], protocol=2)
+        if local.get("strategy") == "ast-01":
+            identity["ast_01_format"] = ast_discovery.FORMAT
         expected = digest(identity, 40)
         strategy = self.p.policy.get("discovery_strategy", "auto")
         from .pipeline import selected_packs
         current_selection = sorted(p["pack_id"] for p in selected_packs(self.p.packs, self.p.policy["discovery_max_packs"]))
         if (local["state"] != "success" or local["key"] != expected or local["selected"] != current_selection
+                or local.get("strategy") == "ast-01" and local.get("ast_01_format") != ast_discovery.FORMAT
                 or not set(local["selected"]) <= selected or saved_settings.request_identity() != current_settings.request_identity()
                 or strategy != "auto" and strategy != local.get("strategy", "legacy")):
             raise IncompleteStage("Local inputs/configuration changed or incomplete; run discover-local first")

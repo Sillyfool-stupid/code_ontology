@@ -31,7 +31,7 @@ STAGES = [
     ("scan", "扫描仓库", False), ("parse", "解析并导出结构", False),
     ("prepare", "生成模型输入包", False), ("discover-local", "局部 Schema 提取", True),
     ("merge-schema", "合并 Schema（可直接抽取）", True), ("review-schema", "AI 审查并修正 Schema（可选）", True), ("discover", "发现并合并 Schema（兼容）", True),
-    ("extract", "抽取实例与规则", True), ("finalize", "归并实例产物", False), ("validate", "校验结果", False),
+    ("extract", "抽取实例与规则", True), ("finalize", "归并实例产物", False), ("export-rdf", "导出 RDF 三元组", False), ("validate", "校验结果", False),
     ("evaluate", "匹配参考概念", False), ("report", "生成对比报告", False),
     ("sample", "生成审核表", False), ("summarize", "汇总人工审核", False),
     ("experiment", "运行六组基线", True),
@@ -180,6 +180,9 @@ class Workbench:
         draft = file_hash(run / "schema/draft-schema.json") if run and (run / "schema/draft-schema.json").is_file() else None
         draft_mapping = file_hash(run / "schema/draft-source-mapping.json") if run and (run / "schema/draft-source-mapping.json").is_file() else None
         base = {"snapshot": w["snapshot"], "view": w["view"], "profile": w["profile"], "experiment": w["experiment"]}
+        if stage == "export-rdf":
+            from .rdf_export import input_fingerprint
+            return input_fingerprint(run, snap) if run else digest(base)
         if stage in {"doctor", "connection"}:
             return digest({"stage": stage, "settings": settings.public(), "parser": select_backend(policy, settings)})
         if stage in {"scan", "parse"}:
@@ -196,6 +199,7 @@ class Workbench:
             if stage == "extract":
                 selected_prompts = {k:v for k,v in selected_prompts.items() if "/discover." not in k and "/merge." not in k}
             return digest({**base, "packs": packs, "schema": schema if stage in {"extract", "finalize"} else None,
+                           "extract_batch_packs": policy.get("extract_batch_packs", 1) if stage in {"extract", "finalize"} else None,
                            "review_inputs": [draft, draft_mapping, policy["review_batch_items"], policy["review_max_rounds"]] if stage == "review-schema" else None,
                            "allow_unreviewed": policy["allow_unreviewed_schema"] if stage == "extract" else None,
                            "local": stamp(Path(w["snapshot"]) / "runs" / w["experiment"] / w["view"] / w["profile"] / "schema/local-manifest.json") if stage == "merge-schema" and w["snapshot"] else None,
@@ -243,6 +247,12 @@ class Workbench:
         r = self.roots(w)
         snap, run = r.get("snapshot"), r.get("run")
         required = []
+        if stage == "export-rdf":
+            if not run:
+                return ["请先选择快照并归并实例产物"]
+            required = [run / "metrics.json", run / "final/schema.json"]
+            required += [run / "final" / f"{k}.jsonl" for k in ("entities", "relations", "attributes", "rules", "candidates")]
+            return [f"请先归并实例产物，缺少：{p}" for p in required if not p.is_file()]
         if stage in {"parse", "prepare", "discover", "discover-local", "merge-schema", "review-schema", "finalize", "extract", "validate", "evaluate", "report", "sample", "summarize"} and not snap:
             return ["请先扫描/解析或选择已有快照"]
         if snap and stage in {"prepare", "discover", "discover-local", "merge-schema", "review-schema", "finalize", "extract", "validate"} and w["view"] not in snapshot_parser(snap)["available_views"]:
@@ -320,7 +330,7 @@ class Workbench:
             inputs["模型证据包"] = str(snap / "prepared" / w["view"] / "packs.jsonl")
         if run and stage == "extract":
             inputs["固定 Schema（执行时复制）"] = str(run / "schema/schema.json")
-        if run and stage in {"validate", "evaluate", "sample"}:
+        if run and stage in {"validate", "evaluate", "sample", "export-rdf"}:
             inputs["本组最终产物"] = str(run / "final")
         if snap and stage == "report":
             inputs["各组指标与执行状态"] = str(snap / "runs" / w["experiment"])
@@ -537,6 +547,9 @@ class Workbench:
         elif stage == "finalize" and run:
             files = [run / "metrics.json", run / "final/schema.json", run / "extraction/selection.json"]
             files += [run / "final" / f"{n}.jsonl" for n in ("entities", "relations", "attributes", "rules", "candidates")]
+        elif stage == "export-rdf" and run:
+            from .rdf_export import FILES
+            files = [run / "rdf" / n for n in (*FILES, "export-manifest.json")]
         elif stage in {"validate", "evaluate"} and run:
             files = [run / ("validation.json" if stage == "validate" else "evaluation.json")]
         elif stage in {"report", "experiment"} and snap:
@@ -553,6 +566,11 @@ class Workbench:
             raise ValueError("产物报告检查未通过")
         if stage == "finalize" and read_json(run / "metrics.json").get("status") != "success":
             raise ValueError("实例产物未全部成功，请检查 metrics 和失败记录")
+        if stage == "export-rdf":
+            from .rdf_export import input_fingerprint
+            manifest = read_json(run / "rdf/export-manifest.json")
+            if manifest.get("state") != "success" or manifest.get("input_fingerprint") != input_fingerprint(run, snap):
+                raise ValueError("RDF 导出未完整通过或输入已变化，请查看 rdf/export-manifest.json")
         if stage in {"discover-local", "merge-schema", "review-schema", "extract"}:
             check = {"discover-local": "schema/local-manifest.json", "merge-schema": "schema/merge-status.json", "review-schema": "schema/review-status.json", "extract": "extraction/manifest.json"}[stage]
             if read_json(run / check).get("state") != "success":
@@ -646,6 +664,10 @@ class Workbench:
             state = "succeeded" if code == 0 else "failed"
             if self.job(jid)["state"] == "cancelling":
                 state = "cancelled"
+            elif code and job["stage"] == "export-rdf" and w["snapshot"]:
+                rdf_manifest = self.roots(w)["run"] / "rdf/export-manifest.json"
+                if rdf_manifest.is_file() and read_json(rdf_manifest).get("state") == "partial":
+                    state = "partial"
             elif code and w["snapshot"] and job["stage"] in {"discover", "discover-local", "merge-schema", "review-schema", "finalize", "extract", "experiment"}:
                 run = self.roots(w)["run"]
                 if job["stage"] == "experiment":

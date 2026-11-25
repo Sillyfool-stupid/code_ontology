@@ -91,7 +91,7 @@ function reviewForm(record){
 async function graphPage(epoch){
   document.title=`${S.layer==="schema"?"Schema":"Instances"} · ${S.run.experiment} · Code Atlas`;
   $("#page-content").innerHTML=`<div class="graph-grid"><section class="panel"><div class="panel-head"><div><h2>${S.layer==="schema"?"本体结构 · Schema":"实例关系 · Instances"}</h2><small>结构视图与实例视图分别展示，点击条目追溯证据</small></div><button class="button" id="export-svg">导出 SVG</button></div><div class="toolbar"><button class="button ${S.layer==="schema"?'selected':''}" id="schema-layer">本体结构</button><button class="button ${S.layer==="instances"?'selected':''}" id="instance-layer">抽取实例</button><input id="graph-search" aria-label="搜索图谱" placeholder="搜索名称或定义"><button class="button" id="graph-find">筛选</button><label for="graph-layout">布局<select id="graph-layout" aria-label="图谱布局"><option value="horizontal">横向连接</option><option value="vertical">纵向连接</option><option value="grid">网格布局</option></select></label><button class="button" id="graph-fit">适应画布</button><button class="button" id="graph-reset">复位</button></div><div class="graph-wrap" id="graph-host"></div><div class="legend"><span><i></i>${S.layer==="schema"?"业务概念":"实体"}</span><span><i class="blue"></i>${S.layer==="schema"?"层级 / 业务关系":"实例关系"}</span><span>拖拽节点调整位置 · 拖动空白平移 · 滚轮缩放</span></div><div class="graph-note" id="graph-note"></div></section>${detailPanel()}</div>`;
-  $("#schema-layer").onclick=()=>{rememberPage();S.layer="schema";render().catch(failure);};$("#instance-layer").onclick=()=>{rememberPage();S.layer="instances";render().catch(failure);};
+  $("#schema-layer").onclick=()=>selectGraphLayer("schema");$("#instance-layer").onclick=()=>selectGraphLayer("instances");
   if(S.layer==="schema"){
     const bar=document.createElement("div");bar.className="toolbar";
     const label=document.createElement("label");label.textContent="Schema 版本";label.htmlFor="schema-version";
@@ -120,13 +120,21 @@ async function graphPage(epoch){
     }
     const ids=new Set(nodes.map(n=>n.id));edges=edges.filter(e=>ids.has(e.from)&&ids.has(e.to)).slice(0,160);
     const omitted=S.layer==="instances"&&relationTotal>relations.length?`；关系输入限前 ${relations.length}/${relationTotal} 条`:"";
-    $("#graph-note").textContent=`当前展示 ${nodes.length}/${total} 个节点、${edges.length} 条边。图中最多显示 80 个节点、160 条边${omitted}，筛选仅作用于已加载节点；实例输入最多加载前 1000 个实体。完整结果请在「知识断言」中检索。属性定义在概念详情中查看。`;
+    $("#graph-note").textContent=(S.layer==="instances"&&!instanceTotal?"尚无归并后的实体，请先完成“抽取实例与规则”和“归并实例产物”，再重新加载产物。 ":"")+`当前展示 ${nodes.length}/${total} 个节点、${edges.length} 条边。图中最多显示 80 个节点、160 条边${omitted}，筛选仅作用于已加载节点；实例输入最多加载前 1000 个实体。完整结果请在「知识断言」中检索。属性定义在概念详情中查看。`;
     drawGraph(nodes,edges);
   }
   $("#graph-find").onclick=draw;$("#graph-search").onkeydown=e=>{if(e.key==="Enter")draw();};$("#graph-reset").onclick=()=>{$("#graph-search").value="";S.graphPositions.delete(graphPositionKey());draw();};
   $("#graph-layout").onchange=e=>{S.graphLayout=e.target.value;draw();};
   $("#graph-fit").onclick=()=>$("#graph-host svg")?.fitGraph();
   $("#export-svg").onclick=()=>{const svg=$("#graph-host svg");if(svg)download(`ontology-${S.layer}.svg`,new XMLSerializer().serializeToString(svg),"image/svg+xml");};draw();
+}
+function selectGraphLayer(layer){
+  const params=new URLSearchParams(location.search);
+  if(params.get('embedded')==='1'&&window.parent!==window){
+    window.parent.postMessage({type:'code-atlas-layer',layer},location.origin);
+    if(layer==='instances'&&params.get('mode')==='schema')return;
+  }
+  rememberPage();S.layer=layer;render().catch(failure);
 }
 function graphPositionKey(){return JSON.stringify([S.run.id,S.layer,S.snapshot?.path||"current",S.graphLayout]);}
 function graphLayout(nodes,edges,direction){

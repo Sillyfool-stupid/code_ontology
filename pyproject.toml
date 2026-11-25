@@ -7,7 +7,7 @@ name = "code-ontology-baseline"
 version = "0.1.0"
 description = "Evidence-grounded C/C++ ontology extraction with Joern or Tree-sitter and an OpenAI-compatible LLM"
 requires-python = ">=3.10"
-dependencies = ["openai>=1.50,<3", "python-dotenv>=1,<2", "PyYAML>=6,<7", "pydantic>=2.8,<3", "ijson>=3.3,<4", "tree-sitter>=0.26,<0.27", "tree-sitter-c>=0.24,<0.25", "tree-sitter-cpp>=0.23,<0.24"]
+dependencies = ["openai>=1.50,<3", "python-dotenv>=1,<2", "PyYAML>=6,<7", "pydantic>=2.8,<3", "ijson>=3.3,<4", "tree-sitter>=0.26,<0.27", "tree-sitter-c>=0.24,<0.25", "tree-sitter-cpp>=0.23,<0.24", "rdflib>=7.1,<8", "pyshacl>=0.30,<0.31"]
 
 [project.scripts]
 code-ontology = "code_ontology.cli:main"

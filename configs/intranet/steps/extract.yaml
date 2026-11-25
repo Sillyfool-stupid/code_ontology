@@ -1,2 +1,4 @@
+policy:
+  extract_batch_packs: 1
 llm:
   concurrency: 2

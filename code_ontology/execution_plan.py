@@ -36,6 +36,8 @@ def build_stage_command(stage, workspace, config, env_file, roots, options=None,
         return args
     if stage == "validate":
         return args + [stage, "--snapshot", snapshot, "--view", workspace["view"], "--run-dir", str(run)] + common
+    if stage == "export-rdf":
+        return args + [stage, "--snapshot", snapshot, "--run-dir", str(run)] + common
     if stage == "evaluate":
         return args + [stage, "--run-dir", str(run), "--gold", workspace["gold"]] + common
     if stage == "report":

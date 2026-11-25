@@ -14,7 +14,7 @@ from .config import PROJECT, env_values, load_policy, load_settings, configurati
 from .util import digest, now, read_json, write_json, file_hash
 from .events import execution, emit, redact
 
-STEPS = ("scan", "parse", "normalize", "prepare", "discover-local", "merge-schema", "review-schema", "extract", "finalize", "validate", "report")
+STEPS = ("scan", "parse", "normalize", "prepare", "discover-local", "merge-schema", "review-schema", "extract", "finalize", "export-rdf", "validate", "report")
 
 
 @contextmanager
@@ -76,6 +76,9 @@ def stage_fingerprint(step, session, settings, policy):
     snap = Path(session["snapshot"]) if session.get("snapshot") else None
     view, profile = session["view"], session["profile"]
     run = snap / "runs" / session["experiment"] / view / profile if snap else None
+    if step == "export-rdf":
+        from .rdf_export import input_fingerprint
+        return input_fingerprint(run, snap) if run else digest({"step": step, "snapshot": None})
     data = {"step": step, "repo": session["repo"], "snapshot": str(snap)}
     def stamp(path):
         return file_hash(path) if path and path.is_file() else None
@@ -96,6 +99,9 @@ def stage_fingerprint(step, session, settings, policy):
             data["recovery"] = policy["recovery_max_depth"]
             if stage == "discover":
                 data["selection"] = [policy["discovery_max_packs"], policy["batch_packs"]]
+                if policy.get("discovery_strategy") == "ast-01":
+                    from .ast_discovery import FORMAT
+                    data["ast_01"] = FORMAT
             if stage == "merge":
                 data["local"] = stamp(run / "schema/local-manifest.json") if run else None
                 data["batch"] = policy["merge_batch_items"]
@@ -104,6 +110,7 @@ def stage_fingerprint(step, session, settings, policy):
                 data["mapping"] = stamp(run / "schema/draft-source-mapping.json") if run else None
                 data["review"] = [policy["review_batch_items"], policy["review_max_rounds"]]
             if step in {"extract", "finalize"}:
+                data["extract_batch_packs"] = policy.get("extract_batch_packs", 1)
                 data["schema"] = stamp(run / "schema/schema.json") if run else None
                 data["allow_unreviewed_schema"] = policy["allow_unreviewed_schema"]
         if step in {"finalize", "validate", "report"}:
@@ -143,6 +150,9 @@ def execute(step, session, settings, policy):
         prepare(dest, view, policy)
     elif step == "validate":
         return validate(dest, view, run)
+    elif step == "export-rdf":
+        from .rdf_export import export_rdf
+        return 0 if export_rdf(run, dest)["state"] == "success" else 1
     elif step == "report":
         if not (run / "metrics.json").is_file():
             raise ValueError("Run finalize first")

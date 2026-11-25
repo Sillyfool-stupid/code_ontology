@@ -23,7 +23,7 @@ def parser():
     root = argparse.ArgumentParser(description="Joern / Tree-sitter + LLM 代码业务本体抽取")
     sub = root.add_subparsers(dest="command", required=True)
     commands = {}
-    for name in ("scan", "parse", "prepare", "discover", "extract", "run", "experiment", "doctor", "report", "validate", "evaluate", "import-graph", "normalize", "discover-local", "merge-schema", "review-schema", "finalize"):
+    for name in ("scan", "parse", "prepare", "discover", "extract", "run", "experiment", "doctor", "report", "validate", "evaluate", "import-graph", "normalize", "discover-local", "merge-schema", "review-schema", "finalize", "export-rdf"):
         p = sub.add_parser(name)
         p.add_argument("--env-file")
         p.add_argument("--config", help="YAML policy; unknown keys are rejected")
@@ -45,6 +45,8 @@ def parser():
         commands[name].add_argument("--view", choices=["ast", "cfg", "cpg"], default="cpg")
     for name in ("discover", "extract", "run", "experiment", "discover-local", "merge-schema", "review-schema", "finalize"):
         p = commands[name]
+        p.add_argument("--discovery-strategy", choices=["auto", "legacy", "budget", "ast-01"],
+                       help="AST-01 is an opt-in schema discovery strategy for the ast view")
         p.add_argument("--profile", choices=["general", "maintenance", "both"])
         p.add_argument("--experiment", default="baseline", help="Use a new ID for independent repeated experiments")
         p.add_argument("--update-schema", action="store_true")
@@ -62,6 +64,9 @@ def parser():
     commands["report"].add_argument("--experiment", default="baseline")
     commands["report"].add_argument("--run-dir", type=Path)
     commands["validate"].add_argument("--run-dir", type=Path)
+    commands["export-rdf"].add_argument("--run-dir", type=Path, required=True)
+    commands["export-rdf"].add_argument("--snapshot", type=Path, help="Source snapshot for stable identity and evidence locations")
+    commands["export-rdf"].add_argument("--base-iri", default="urn:code-ontology:")
     commands["evaluate"].add_argument("--run-dir", type=Path, required=True)
     commands["evaluate"].add_argument("--gold", type=Path, required=True)
     commands["import-graph"].add_argument("--nodes", type=Path, required=True)
@@ -186,8 +191,13 @@ def main(argv=None):
     configure_console()
     args = parser().parse_args(argv)
     try:
+        if args.command == "export-rdf":
+            from .rdf_export import export_rdf
+            return 0 if export_rdf(args.run_dir, args.snapshot, args.base_iri)["state"] == "success" else 1
         settings = load_settings(args.env_file, args.config)
         policy = load_policy(args.config, args.env_file)
+        if getattr(args, "discovery_strategy", None):
+            policy["discovery_strategy"] = args.discovery_strategy
         if args.parser_backend:
             policy["parser_backend"] = args.parser_backend
         for key in ("include", "exclude", "max_files"):

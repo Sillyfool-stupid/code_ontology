@@ -143,6 +143,7 @@ POLICY_ENV = {
     "joern_timeout": ("CO_PARSE_TIMEOUT_SECONDS", int), "pack_tokens": ("CO_PACK_BUDGET", int),
     "graph_nodes_per_pack": ("CO_GRAPH_NODES_PER_PACK", int), "neighbor_limit": ("CO_NEIGHBOR_LIMIT", int),
     "discovery_max_packs": ("CO_DISCOVERY_SAMPLE_LIMIT", int), "batch_packs": ("CO_DISCOVERY_BATCH_PACKS", int),
+    "extract_batch_packs": ("CO_EXTRACT_BATCH_PACKS", int),
     "merge_batch_items": ("CO_MERGE_BATCH_ITEMS", int), "merge_max_rounds": ("CO_MERGE_MAX_ROUNDS", int),
     "recovery_max_depth": ("CO_RECOVERY_MAX_DEPTH", int),
     "review_batch_items": ("CO_REVIEW_BATCH_ITEMS", int), "review_max_rounds": ("CO_REVIEW_MAX_ROUNDS", int),
@@ -180,7 +181,7 @@ def load_policy(path: str | None = None, env_file: str | None = None, frozen=Fal
         data["discovery_max_packs"] = 0
     if data["output_language"] not in {"mixed", "en", "zh"}:
         raise ValueError("CO_OUTPUT_LANGUAGE must be mixed/en/zh")
-    for key in ("pack_tokens", "graph_nodes_per_pack", "batch_packs", "merge_max_rounds", "merge_batch_items", "recovery_max_depth", "joern_timeout", "max_file_bytes", "review_batch_items", "review_max_rounds"):
+    for key in ("pack_tokens", "graph_nodes_per_pack", "batch_packs", "extract_batch_packs", "merge_max_rounds", "merge_batch_items", "recovery_max_depth", "joern_timeout", "max_file_bytes", "review_batch_items", "review_max_rounds"):
         if not isinstance(data[key], int) or data[key] <= 0:
             raise ValueError(f"{key} must be a positive integer")
     for key in ("neighbor_limit", "discovery_max_packs", "max_files", "review_max_requests", "review_max_seconds", "review_max_tokens"):
@@ -194,8 +195,8 @@ def load_policy(path: str | None = None, env_file: str | None = None, frozen=Fal
             raise ValueError(f"Invalid {key}")
     if data["parser_backend"] not in {"auto", "joern", "tree-sitter"}:
         raise ValueError("parser_backend must be auto, joern or tree-sitter")
-    if data["discovery_strategy"] not in {"auto", "legacy", "budget"}:
-        raise ValueError("CO_DISCOVERY_STRATEGY must be auto/legacy/budget")
+    if data["discovery_strategy"] not in {"auto", "legacy", "budget", "ast-01"}:
+        raise ValueError("CO_DISCOVERY_STRATEGY must be auto/legacy/budget/ast-01")
     return data
 
 

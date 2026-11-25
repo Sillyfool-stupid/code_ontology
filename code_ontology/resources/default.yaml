@@ -19,6 +19,7 @@ neighbor_limit: 3
 graph_nodes_per_pack: 100
 discovery_max_packs: 24
 batch_packs: 2
+extract_batch_packs: 1
 discovery_strategy: auto
 merge_max_rounds: 8
 prompt_dir: null
