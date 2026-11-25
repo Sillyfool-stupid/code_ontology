@@ -302,6 +302,11 @@ class SchemaReview:
                     archive.finish("success", review_status="ai_review_not_human_verified")
                     write_json(self.root / "review-status.json", {"state": "success", "key": key, "schema_hash": digest(final),
                                "mapping_hash": digest(mapped_audit), "history": str(archive.root), "ended_at": now(), "review_status": "ai_review_not_human_verified"})
+                    from .artifacts import update_cost_coverage
+                    update_cost_coverage(self.root, "review", len(self.p.packs), state="success",
+                                         planned_sources=len(source_rows), completed_checkpoints=len(checkpoints),
+                                         unresolved_issues=0, rounds=round_number,
+                                         elapsed_seconds=round(time.monotonic()-self.started, 3), llm=dict(self.llm.stats))
                     self.p.save_state("review-schema", "success", schema_hash=digest(final))
                     return result.ontology
                 focus = {f["source_id"] for f in findings} | {sid for i in errors for sid in i["source_ids"]}
@@ -312,6 +317,12 @@ class SchemaReview:
             raise IncompleteStage("AI review still has unresolved errors; draft and review candidates retained; inspect review-report.json")
         except BaseException as exc:
             archive.finish("partial", error=self.llm.safe_error(exc))
+            from .artifacts import update_cost_coverage
+            update_cost_coverage(self.root, "review", len(self.p.packs), state="partial",
+                                 planned_sources=len(source_rows), completed_checkpoints=len(checkpoints),
+                                 unresolved_issues=sum(1 for issue in ledger.values() if issue["status"] == "unresolved"),
+                                 error=self.llm.safe_error(exc), elapsed_seconds=round(time.monotonic()-self.started, 3),
+                                 llm=dict(self.llm.stats))
             partial = MergeResponse(ontology=schema, source_mapping=list(mappings.values()))
             accepted, pending, _ = assess_alignment(partial, original, decisions)
             write_json(self.root / "review-report.json", {"key": key, "issues": history,

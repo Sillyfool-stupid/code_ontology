@@ -11,9 +11,10 @@ from .models import Ontology, supported_ids
 from .schema_history import SchemaHistory, split_location
 from .schema_merge import (MERGE_FORMAT, MergeResponse, canonical_merge, coalesce, compose,
                            final_mapping, initial_candidates, merge_payload, validate_merge, alignment_findings, retain_missing_sources)
-from .util import canonical, digest, now, read_json, unique, write_json, write_jsonl
+from .util import canonical, digest, now, read_json, token_bound, unique, write_json, write_jsonl
 from .events import emit
 from .discovery import payload as discovery_payload, batches as discovery_batches
+from .artifacts import update_cost_coverage
 
 
 class IncompleteStage(RuntimeError):
@@ -47,6 +48,15 @@ class SchemaStages:
         contract = MergeResponse if self.stage == "merge" else Ontology
         return digest({"input": payload, "prompt": self.system, "settings": self.settings.request_identity() if self.stage == "discover" else self.settings.public(),
                        "contract": contract.model_json_schema(), "format": MERGE_FORMAT if self.stage == "merge" else 1}, 40)
+
+    @staticmethod
+    def merge_output_estimate(rows):
+        """Plan merge batches using ontology text plus mandatory source mappings."""
+        schemas = [row["schema"] for row in rows]
+        source_items = sum(len(schema[category]) for schema in schemas
+                           for category in ("classes", "relations", "properties"))
+        # JSON output repeats most ontology content and adds one mapping per source item.
+        return max(1, (token_bound(schemas) + 3) // 4 + source_items * 24 + 256)
 
     def call(self, payload):
         """A successful checkpoint is reused only for precisely matching inputs."""
@@ -227,6 +237,11 @@ class SchemaStages:
                     "errors": self.errors, "ended_at": now(), "elapsed_seconds": round(time.monotonic()-started, 3),
                     "performance": dict(self.llm.stats)}
         write_json(self.root / "local-manifest.json", manifest)
+        update_cost_coverage(self.root, "discover", len(self.p.packs), state=manifest["state"],
+                             selected_packs=len(chosen), unselected_packs=len(self.p.packs)-len(chosen),
+                             initial_batches=len(batches), completed_batches=completed,
+                             output_schemas=len(schemas), failures=len(self.errors),
+                             elapsed_seconds=manifest["elapsed_seconds"], llm=dict(self.llm.stats))
         self.p.save_state("discover-local", manifest["state"], tasks=len(batches), failures=len(self.errors))
         if self.errors or not schemas:
             raise IncompleteStage("Local discovery incomplete; rerun discover-local. Successful checkpoints are retained")
@@ -269,6 +284,7 @@ class SchemaStages:
         self.p.save_state("merge-schema", "running")
         write_json(self.root / "merge-status.json", {"state": "running", "started_at": now(), "local_key": local["key"]})
         audit_paths = []
+        merge_stats = {"rounds": 0, "planned_batches": 0, "model_batches": 0, "passthrough_batches": 0}
         write_jsonl(self.root / "unresolved.jsonl", [])
         try:
             for round_number in range(self.p.policy["merge_max_rounds"]):
@@ -279,12 +295,34 @@ class SchemaStages:
                 shift = round_number % max(1, len(candidates))
                 reordered = candidates[shift:] + candidates[:shift]
                 groups = [initial_candidates(rows)[0] for rows in local["modules"].values()] if by_module else [reordered]
-                batches = [batch for group in groups for batch in group_batches(group, self.system, self.llm, make, self.p.policy["merge_batch_items"])]
+                batches = [batch for group in groups for batch in group_batches(
+                    group, self.system, self.llm, make, self.p.policy["merge_batch_items"],
+                    output_estimate=self.merge_output_estimate, max_output_tokens=self.settings.max_output_tokens)]
+                merge_stats["rounds"] = round_number + 1
+                merge_stats["planned_batches"] += len(batches)
                 merged = []
                 def merge_batch(batch, location, depth=0):
+                    if len(batch) == 1:
+                        merge_stats["passthrough_batches"] += 1
+                        from .pipeline import canonical_schema
+                        source = batch[0]
+                        schema, remap = canonical_schema(Ontology.model_validate(source["schema"]),
+                                                         self.p.profile, return_id_map=True)
+                        lineage = defaultdict(list)
+                        for item_id, roots in source["lineage"].items():
+                            lineage[remap[item_id]].extend(roots)
+                        candidate = {"schema": schema.model_dump(),
+                                     "lineage": {key: sorted(set(roots)) for key, roots in lineage.items()},
+                                     "pending": list(source["pending"])}
+                        self.history.snapshot(f"{location}/passthrough", [candidate["schema"]],
+                            state="deterministic_passthrough", mapping={"lineage": candidate}, checkpoint=None)
+                        emit("merge_passthrough", stage="merge", items=1,
+                             message="单候选无需语义对齐，完成校验后直接进入下一轮")
+                        return [candidate]
                     try:
                         payload = make(batch)
                         self.history_location, self.history_candidate = location, 0
+                        merge_stats["model_batches"] += 1
                         value = self.call(payload)
                         audit_paths.append(self.root / "merge" / f"{self.signature(payload)}.json")
                         _, sources = merge_payload([c["schema"] for c in batch], self.p.profile)
@@ -339,6 +377,11 @@ class SchemaStages:
                                "alignment_issues": len(findings), "local_key": local["key"], "history": str(self.history.root), "ended_at": now()})
                     self.history.snapshot("final", [value.model_dump()], mapping=audit, alignment_issues=findings)
                     self.history.finish("success", quality_state="pending_ai_review")
+                    update_cost_coverage(self.root, "merge", len(self.p.packs), state="success",
+                                         source_schemas=len(local["schemas"]), source_items=len(registry),
+                                         final_items=sum(len(getattr(value, category)) for category in ("classes", "relations", "properties")),
+                                         alignment_issues=len(findings), history=str(self.history.root),
+                                         llm=dict(self.llm.stats), **merge_stats)
                     print(f"SCHEMA={self.root / 'schema.json'} alignment_issues={len(findings)} review=pending; Next: intranet extract (optional: intranet review-schema)", flush=True)
                     self.p.save_state("merge-schema", "success", schema_hash=digest(value.model_dump()))
                     self.p.save_state("discover", "success", schema_hash=digest(value.model_dump()))
@@ -349,6 +392,10 @@ class SchemaStages:
             raise IncompleteStage("Merge rounds exhausted; checkpoints retained")
         except BaseException as exc:
             self.history.finish("partial", error=self.llm.safe_error(exc))
+            update_cost_coverage(self.root, "merge", len(self.p.packs), state="partial",
+                                 source_schemas=len(local["schemas"]), source_items=len(registry),
+                                 error=self.llm.safe_error(exc), history=str(self.history.root),
+                                 llm=dict(self.llm.stats), **merge_stats)
             write_json(self.root / "module-schemas.json", {"schemas": [c["schema"] for c in candidates],
                        "lineage": candidates, "note": "Unaligned candidates; not a complete global ontology"})
             write_json(self.root / "merge-status.json", {"state": "partial", "error": self.llm.safe_error(exc),
