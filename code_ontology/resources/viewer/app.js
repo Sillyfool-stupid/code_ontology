@@ -18,7 +18,7 @@ async function refresh(){
   const list=await api("runs"); S.runs=list.runs;
   $("#run-select").innerHTML=S.runs.map(r=>`<option value="${r.id}">${esc(r.fixture ? "[模拟测试] " : "")}${esc(r.experiment)} · ${esc(r.view.toUpperCase())} / ${esc(r.profile)} · ${esc(r.snapshot.slice(0,10))}</option>`).join("");
   if(!S.runs.length){$("#run-select").innerHTML='<option>尚未找到实验产物</option>';$("#page-content").innerHTML='<div class="panel empty">此输出目录下还没有实验。<br>先运行 README 中的 smoke 命令，或使用 --root 指定已有 outputs 目录。</div>';return;}
-  const selected=S.runs.find(r=>r.id===S.run?.id)||S.runs[0];$("#run-select").value=selected.id;
+  const selected=S.runs.find(r=>r.id===(S.run?.id||new URLSearchParams(location.search).get("run")))||S.runs[0];$("#run-select").value=selected.id;
   if(list.warnings.length)toast(`${list.warnings.length} 个目录暂时无法读取；运行中产物可稍后刷新。`);
   await selectRun(selected.id);
 }
@@ -96,7 +96,7 @@ async function graphPage(epoch){
     const bar=document.createElement("div");bar.className="toolbar";
     const label=document.createElement("label");label.textContent="Schema 版本";label.htmlFor="schema-version";
     const select=document.createElement("select");select.id="schema-version";select.setAttribute("aria-label","选择 Schema 历史版本");select.style.maxWidth="85%";
-    const current=document.createElement("option");current.value="";current.textContent="当前结果（实例抽取使用的 Schema）";select.append(current);
+    const current=document.createElement("option");current.value="";current.textContent=new URLSearchParams(location.search).get("mode")==="schema"?"当前发现 Schema":"当前结果（实例抽取使用的 Schema）";select.append(current);
     for(const row of S.detail.schema_history||[]){const option=document.createElement("option");option.value=row.path;option.textContent=`${row.stage==="merge"?"合并":"审查"} · ${row.created_at.slice(0,19)} · ${row.location} · ${row.path.split("/").pop()}${row.state!=="accepted"?" · 未校验候选":""}`;select.append(option);}
     select.value=S.snapshot?.path||"";select.onchange=async()=>{try{const id=S.run.id,value=select.value;const data=value?await api("schema-snapshot",{id,path:value}):null;if(id!==S.run.id||select.value!==value)return;S.snapshot=data;await render();}catch(e){failure(e);}};
     bar.append(label,select);$("#graph-host").before(bar);
@@ -260,4 +260,4 @@ $$('.nav').forEach(n=>n.onclick=()=>{navigatePage(n.dataset.page).catch(failure)
 
 $("#viewer-back").onclick=()=>{if(detailHistory.length){S.detailEpoch++;const item=detailHistory.pop(),target=$("#detail-body");if(target){target.replaceChildren(...item.nodes);target.className=item.className;target.scrollTop=item.scroll;}updateBack();return;}const item=pageHistory.pop();if(item){Object.assign(S,item);render().then(()=>window.scrollTo(0,item.scroll)).catch(failure);}updateBack();};
 const embedded=new URLSearchParams(location.search).get('embedded')==='1';
-if(embedded){document.body.classList.add('embedded');$("#return-workbench").hidden=false;$("#return-workbench").onclick=()=>{if(window.parent!==window)window.parent.postMessage({type:'code-atlas-return'},location.origin);};}
+if(embedded){$('#run-select').disabled=true;document.body.classList.add('embedded');$("#return-workbench").hidden=false;$("#return-workbench").onclick=()=>{if(window.parent!==window)window.parent.postMessage({type:'code-atlas-return'},location.origin);};}
