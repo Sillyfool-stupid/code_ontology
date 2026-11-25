@@ -98,6 +98,7 @@ def stage_fingerprint(step, session, settings, policy):
             data["prompt"] = prompt(policy, profile, stage)
             data["recovery"] = policy["recovery_max_depth"]
             if stage == "discover":
+                data["pass_count"] = policy.get("discovery_pass_count", 1)
                 data["selection"] = [policy["discovery_max_packs"], policy["batch_packs"]]
                 if policy.get("discovery_strategy") == "ast-01":
                     from .ast_discovery import FORMAT
@@ -105,6 +106,7 @@ def stage_fingerprint(step, session, settings, policy):
             if stage == "merge":
                 data["local"] = stamp(run / "schema/local-manifest.json") if run else None
                 data["batch"] = policy["merge_batch_items"]
+                data["pass_count"] = policy.get("merge_pass_count", 1)
             if stage == "review":
                 data["draft"] = stamp(run / "schema/draft-schema.json") if run else None
                 data["mapping"] = stamp(run / "schema/draft-source-mapping.json") if run else None

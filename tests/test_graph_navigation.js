@@ -68,5 +68,26 @@ function browser(file, search='') {
   graph.run('api=async()=>({total:0,rows:[]});');
   await graph.run('graphPage(S.epoch)');
   assert.match(graph.run(`$('#graph-note').textContent`),/归并实例产物/);
+  // Stage stop buttons bind the active task, regardless of the selected history task.
+  const stages=browser('workbench');
+  stages.run(`renderDetail=()=>{};renderJob=()=>{};renderPrompt=()=>{};
+    $('#settings-form').elements={namedItem:()=>({options:[]})};
+    S.data={workspace:{view:'ast',profile:'maintenance',snapshot:''},policy:{},settings:{},roots:{},
+      jobs:[{id:'live-merge',stage:'merge-schema',state:'running'}],
+      stages:[{id:'discover-local',label:'Local',blocked:[]},{id:'merge-schema',label:'Merge',blocked:[]}]};
+    S.job='unrelated-history';let stops=[];let cancelled=[];
+    document.querySelectorAll=selector=>selector==='[data-stop]'?stops:[];
+    api=async(name,args)=>{cancelled.push({name,args});};poll=async()=>{};
+    stops=[{dataset:{stop:'live-merge'},disabled:false}];render();`);
+  let html=stages.run(`$('#stages').innerHTML`);
+  assert.match(html,/data-stop="" disabled/);
+  assert.match(html,/data-stop="live-merge" >/);
+  await stages.run(`stops[0].onclick({stopPropagation(){}})`);
+  assert.equal(stages.run('cancelled[0].args.id'),'live-merge');
+  assert.equal(stages.run('stops[0].disabled'),true);
+  stages.run(`S.data.jobs[0].state='cancelling';render();`);
+  assert.match(stages.run(`$('#stages').innerHTML`),/data-stop="live-merge" disabled>停止中/);
+  stages.run(`S.data.jobs[0].state='succeeded';render();`);
+  assert.doesNotMatch(stages.run(`$('#stages').innerHTML`),/data-stop="live-merge"/);
   console.log('Graph navigation and rendering checks passed');
 })().catch(error=>{console.error(error);process.exitCode=1;});

@@ -1,4 +1,5 @@
 policy:
+  discovery_pass_count: 1
   discovery_strategy: budget
   batch_packs: 8
 llm:

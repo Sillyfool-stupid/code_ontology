@@ -25,6 +25,11 @@ class ModelFailure(RuntimeError):
     pass
 
 
+class NonRetryableModelFailure(ModelFailure):
+    """Authentication, endpoint or request configuration requires intervention."""
+    pass
+
+
 class RequestUnknown(ModelFailure):
     """The client stopped waiting; the server may still be computing."""
     pass
@@ -163,7 +168,7 @@ class LLM:
                         self.json_supported = False
                         continue
                     if e.status_code not in {408, 409, 429} and e.status_code < 500:
-                        raise ModelFailure(f"Non-retryable API error ({e.status_code}); inspect request log") from e
+                        raise NonRetryableModelFailure(f"Non-retryable API error ({e.status_code}); inspect request log") from e
                     if attempt >= self.settings.retries:
                         raise ModelFailure(f"API retries exhausted ({e.status_code}); inspect request log") from e
                 except APITimeoutError as e:

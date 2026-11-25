@@ -198,7 +198,8 @@ class Workbench:
                 selected_prompts = {k: v for k, v in selected_prompts.items() if k.startswith("common/") or k.endswith(f"/{stage_name}.txt")}
             if stage == "extract":
                 selected_prompts = {k:v for k,v in selected_prompts.items() if "/discover." not in k and "/merge." not in k}
-            return digest({**base, "packs": packs, "schema": schema if stage in {"extract", "finalize"} else None,
+            return digest({**base, "packs": packs,
+                           "pass_counts": {"discover": policy.get("discovery_pass_count", 1), "merge": policy.get("merge_pass_count", 1)} if stage == "discover" else policy.get("discovery_pass_count", 1) if stage == "discover-local" else policy.get("merge_pass_count", 1) if stage == "merge-schema" else None, "schema": schema if stage in {"extract", "finalize"} else None,
                            "extract_batch_packs": policy.get("extract_batch_packs", 1) if stage in {"extract", "finalize"} else None,
                            "review_inputs": [draft, draft_mapping, policy["review_batch_items"], policy["review_max_rounds"]] if stage == "review-schema" else None,
                            "allow_unreviewed": policy["allow_unreviewed_schema"] if stage == "extract" else None,
@@ -629,7 +630,7 @@ class Workbench:
                         log.write(f"{event['time']} [{event['level']}] {event['stage']} {event['message']}\n")
                         if event["kind"] == "progress":
                             self.update_job(jid, progress={"phase": event["stage"], **{
-                                key: event.get(key, 0) for key in ("completed", "total", "successful", "failed", "unknown", "remaining", "elapsed_seconds")}})
+                                key: event.get(key, 0) for key in ("completed", "total", "successful", "failed", "unknown", "remaining", "elapsed_seconds", "pass_number", "max_passes", "round")}})
                         else:
                             self.update_job(jid, last_event=event)
                         continue

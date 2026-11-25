@@ -1,12 +1,12 @@
 """Independent, resumable schema stages. Checkpoints never imply semantic validation."""
 from __future__ import annotations
 
-from concurrent.futures import ThreadPoolExecutor, wait, FIRST_COMPLETED
 from pathlib import Path
 from collections import defaultdict
 import time
 
-from .llm import LLM, BudgetError, ModelFailure, RequestUnknown
+from .llm import LLM, BudgetError, ModelFailure, NonRetryableModelFailure, RequestUnknown
+from .batch_passes import run_passes
 from .models import Ontology, supported_ids
 from .schema_history import SchemaHistory, split_location
 from .schema_merge import (MERGE_FORMAT, MergeResponse, canonical_merge, coalesce, compose,
@@ -172,13 +172,14 @@ class SchemaStages:
                 try:
                     results += self.recover(group, depth + 1)
                 except ModelFailure as exc:
-                    if not isinstance(exc, RequestUnknown):
+                    if isinstance(exc, NonRetryableModelFailure):
                         raise
-                    failures.append(str(exc))
+                    failures.append(exc)
                 except Exception as exc:
-                    failures.append(str(exc))
+                    failures.append(exc)
             if failures:
-                raise IncompleteStage("Some recovery fragments unfinished: " + "; ".join(failures))
+                error_type = RequestUnknown if any(isinstance(e, RequestUnknown) for e in failures) else IncompleteStage
+                raise error_type("Some recovery fragments unfinished: " + "; ".join(map(str, failures)))
             return results
 
     def local(self):
@@ -212,37 +213,24 @@ class SchemaStages:
         values, module_results, completed, started = [], defaultdict(list), 0, time.monotonic()
         emit("progress", stage="discover", completed=0, total=len(batches), successful=0, failed=0, unknown=0,
              message="局部 Schema 批次已冻结；进度单位为初始批次")
-        with ThreadPoolExecutor(max_workers=self.settings.concurrency) as pool:
-            iterator = iter(batches)
-            pending = {}
-            def refill():
-                while len(pending) < self.settings.concurrency:
-                    batch = next(iterator, None)
-                    if batch is None:
-                        break
-                    pending[pool.submit(self.recover, batch)] = batch
-            refill()
-            while pending:
-                done, _ = wait(pending, timeout=15, return_when=FIRST_COMPLETED)
-                for future in done:
-                    batch = pending.pop(future)
-                    try:
-                        result = future.result()
-                        values += result
-                        module_results[str(Path(batch[0]["source_refs"][0]["file"]).parent)] += [s.model_dump() for s in result]
-                    except ModelFailure as exc:
-                        if not isinstance(exc, RequestUnknown):
-                            raise
-                        self.errors.append({"state": "unknown", "packs": [p["pack_id"] for p in batch], "error": str(exc)})
-                    except Exception as exc:
-                        self.errors.append({"state": "failed", "packs": [p["pack_id"] for p in batch], "error": self.llm.safe_error(exc)})
-                    completed += 1
-                    print(f"TASK discover {completed}/{len(batches)} ({completed-len(self.errors)} successful)", flush=True)
-                    emit("progress", stage="discover", completed=completed, total=len(batches),
-                         successful=completed-len(self.errors), failed=sum(e["state"] == "failed" for e in self.errors),
-                         unknown=sum(e["state"] == "unknown" for e in self.errors), remaining=len(batches)-completed,
-                         elapsed_seconds=round(time.monotonic()-started, 3), message="局部批次处理结束")
-                refill()
+        self.errors = []
+        def accept_batch(index, result):
+            nonlocal completed
+            completed += 1
+            values.extend(result)
+            batch = batches[index]
+            module_results[str(Path(batch[0]["source_refs"][0]["file"]).parent)].extend(s.model_dump() for s in result)
+        try:
+            _, errors = run_passes(batches, lambda i, batch, attempt: self.recover(batch),
+                passes=self.p.policy.get("discovery_pass_count", 1), concurrency=self.settings.concurrency,
+                stage="discover", path=self.root / "local-passes.json", safe_error=self.llm.safe_error,
+                on_success=accept_batch)
+        except Exception as exc:
+            current = read_json(self.root / "local-manifest.json")
+            write_json(self.root / "local-manifest.json", {**current, "state": "partial", "ended_at": now(), "error": self.llm.safe_error(exc)})
+            self.p.save_state("discover-local", "partial", error=self.llm.safe_error(exc))
+            raise
+        self.errors = [{**error, "packs": [p["pack_id"] for p in batches[i]]} for i, error in sorted(errors.items())]
         # Deterministic order is essential for stable merge checkpoints across retries.
         schemas = sorted(unique([s.model_dump() for s in values]), key=canonical)
         manifest = {"state": "partial" if self.errors else "success", "key": fingerprint,
@@ -363,13 +351,16 @@ class SchemaStages:
                         cut = len(batch) // 2
                         return (merge_batch(batch[:cut], split_location(location, 1), depth + 1) +
                                 merge_batch(batch[cut:], split_location(location, 2), depth + 1))
-                for i, batch in enumerate(batches):
-                    print(f"MERGE round={round_number+1} batch={i+1}/{len(batches)} items={len(batch)} started={now()}", flush=True)
-                    emit("progress", stage="merge", round=round_number+1, completed=i, total=len(batches), message="合并批次开始")
-                    merged += merge_batch(batch, f"round-{round_number+1:03d}/batch-{i+1:03d}")
-                    emit("progress", stage="merge", round=round_number+1, completed=i+1, total=len(batches), successful=i+1, message="合并批次完成")
-                    write_json(self.root / "merge-status.json", {"state": "running", "round": round_number+1,
-                               "completed": i+1, "total": len(batches), "local_key": local["key"], "updated_at": now()})
+                outcomes, errors = run_passes(batches,
+                    lambda i, batch, attempt: merge_batch(batch, f"round-{round_number+1:03d}/batch-{i+1:03d}" + (f"-pass-{attempt:03d}" if attempt > 1 else "")),
+                    passes=self.p.policy.get("merge_pass_count", 1), concurrency=1, stage="merge",
+                    path=self.root / "merge-passes" / f"round-{round_number+1:03d}.json",
+                    safe_error=self.llm.safe_error, merge_round=round_number+1, stop_on_unknown=True)
+                if errors:
+                    if any(error["state"] == "unknown" for error in errors.values()):
+                        raise RequestUnknown("Merge requests have unknown server state; inspect merge-passes before explicitly resuming")
+                    raise IncompleteStage("Merge batches unfinished; inspect merge-passes and rerun merge-schema. Successful checkpoints retained")
+                merged = [item for i in sorted(outcomes) for item in outcomes[i]]
                 merged = coalesce(merged)
                 self.history.snapshot(f"round-{round_number+1:03d}/result", [c["schema"] for c in merged], mapping=merged)
                 write_json(self.root / "rounds" / f"{digest([local['key'], self.system, self.settings.public(), round_number])}.json",

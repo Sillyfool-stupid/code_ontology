@@ -134,6 +134,8 @@ def validate_settings(result):
 
 
 POLICY_ENV = {
+    "discovery_pass_count": ("CO_DISCOVERY_PASS_COUNT", int),
+    "merge_pass_count": ("CO_MERGE_PASS_COUNT", int),
     "parser_backend": ("CO_PARSER", str), "views": ("CO_VIEW", lambda x: x.split(",")),
     "profiles": ("CO_PROFILE", lambda x: x.split(",")), "output_language": ("CO_OUTPUT_LANGUAGE", str),
     "include": ("CO_SCAN_INCLUDE", json.loads), "exclude": ("CO_SCAN_EXCLUDE", json.loads),
@@ -181,7 +183,7 @@ def load_policy(path: str | None = None, env_file: str | None = None, frozen=Fal
         data["discovery_max_packs"] = 0
     if data["output_language"] not in {"mixed", "en", "zh"}:
         raise ValueError("CO_OUTPUT_LANGUAGE must be mixed/en/zh")
-    for key in ("pack_tokens", "graph_nodes_per_pack", "batch_packs", "extract_batch_packs", "merge_max_rounds", "merge_batch_items", "recovery_max_depth", "joern_timeout", "max_file_bytes", "review_batch_items", "review_max_rounds"):
+    for key in ("discovery_pass_count", "merge_pass_count", "pack_tokens", "graph_nodes_per_pack", "batch_packs", "extract_batch_packs", "merge_max_rounds", "merge_batch_items", "recovery_max_depth", "joern_timeout", "max_file_bytes", "review_batch_items", "review_max_rounds"):
         if not isinstance(data[key], int) or data[key] <= 0:
             raise ValueError(f"{key} must be a positive integer")
     for key in ("neighbor_limit", "discovery_max_packs", "max_files", "review_max_requests", "review_max_seconds", "review_max_tokens"):

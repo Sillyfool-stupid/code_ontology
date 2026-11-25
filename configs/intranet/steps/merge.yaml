@@ -1,4 +1,5 @@
 policy:
+  merge_pass_count: 1
   merge_batch_items: 4
 llm:
   concurrency: 1

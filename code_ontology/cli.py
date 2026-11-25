@@ -47,6 +47,8 @@ def parser():
         p = commands[name]
         p.add_argument("--discovery-strategy", choices=["auto", "legacy", "budget", "ast-01"],
                        help="AST-01 is an opt-in schema discovery strategy for the ast view")
+        p.add_argument("--discovery-pass-count", type=int, help="Total local discovery passes, including the first")
+        p.add_argument("--merge-pass-count", type=int, help="Total failure recovery passes per merge layer")
         p.add_argument("--profile", choices=["general", "maintenance", "both"])
         p.add_argument("--experiment", default="baseline", help="Use a new ID for independent repeated experiments")
         p.add_argument("--update-schema", action="store_true")
@@ -198,6 +200,12 @@ def main(argv=None):
         policy = load_policy(args.config, args.env_file)
         if getattr(args, "discovery_strategy", None):
             policy["discovery_strategy"] = args.discovery_strategy
+        for field in ("discovery_pass_count", "merge_pass_count"):
+            value = getattr(args, field, None)
+            if value is not None:
+                if value < 1:
+                    raise ValueError(field + " must be a positive integer")
+                policy[field] = value
         if args.parser_backend:
             policy["parser_backend"] = args.parser_backend
         for key in ("include", "exclude", "max_files"):
