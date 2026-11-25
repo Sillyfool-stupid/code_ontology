@@ -20,7 +20,7 @@ import yaml
 from .config import PROJECT, RESOURCE, Settings, load_policy, load_settings, configuration_sources
 from .pipeline import prompt
 from .parsing import select_backend, snapshot_parser
-from .prepare import __file__ as prepare_implementation
+from .prepare import PREPARE_FORMAT, __file__ as prepare_implementation
 from .util import canonical, digest, file_hash, now, read_json, within, write_json
 from .workbench_files import Preview, checked, listing
 from .events import read_events, redact
@@ -259,7 +259,7 @@ class Workbench:
                 key = digest({"source": read_json(snap / "manifest.json")["snapshot_id"], "view": w["view"],
                               "policy": {k:policy[k] for k in ("pack_tokens", "neighbor_limit", "graph_nodes_per_pack")},
                               "graph": read_json(graph_index).get("graph_fingerprint"),
-                              "implementation": file_hash(Path(prepare_implementation)), "format": 1})
+                              "implementation": file_hash(Path(prepare_implementation)), "format": PREPARE_FORMAT})
                 if read_json(prepared).get("key") != key:
                     return ["证据包与当前图/预算不一致，请先重新生成模型输入包"]
         if stage == "merge-schema":
@@ -447,6 +447,13 @@ class Workbench:
             environment = dict(os.environ)
             for field, key in MODEL_ENV.items():
                 environment[key] = str(getattr(settings, field))
+            for field, key in (("review_base_url", "OPENAI_REVIEW_BASE_URL"),
+                               ("review_api_key", "OPENAI_REVIEW_API_KEY"),
+                               ("review_model", "OPENAI_REVIEW_MODEL"),
+                               ("review_ca_bundle", "LLM_REVIEW_CA_BUNDLE")):
+                value = getattr(settings, field)
+                if value:
+                    environment[key] = str(value)
             for stage_name in ("discover", "merge", "review", "extract"):
                 overrides = settings.stage_overrides.get(stage_name, {})
                 for attr in ("context_tokens", "max_output_tokens", "send_max_tokens", "timeout", "retries", "concurrency", "temperature", "json_mode", "thinking"):

@@ -10,7 +10,8 @@ from .llm import LLM, BudgetError, ModelFailure, RequestUnknown
 from .models import Ontology, supported_ids
 from .schema_history import SchemaHistory, split_location
 from .schema_merge import (MERGE_FORMAT, MergeResponse, canonical_merge, coalesce, compose,
-                           final_mapping, initial_candidates, merge_payload, validate_merge, alignment_findings, retain_missing_sources)
+                           final_mapping, initial_candidates, merge_payload, validate_merge, alignment_findings, retain_missing_sources,
+                           build_concept_registry, registry_candidates, split_candidate_components)
 from .util import canonical, digest, now, read_json, token_bound, unique, write_json, write_jsonl
 from .events import emit
 from .discovery import payload as discovery_payload, batches as discovery_batches
@@ -277,7 +278,12 @@ class SchemaStages:
     def merge(self):
         local = self.verify_local()
         from .pipeline import prompt
+        shared_registry_path = self.p.dest.parent / "registries" / self.p.namespace / f"{self.p.view}-{self.p.profile}.json"
+        previous_registry = read_json(shared_registry_path) if shared_registry_path.is_file() else None
+        write_json(self.root / "registry-candidates.json", registry_candidates(local["schemas"], previous_registry))
         candidates, registry = initial_candidates(local["schemas"])
+        candidates = [part for candidate in candidates
+                      for part in split_candidate_components(candidate, self.p.policy["merge_batch_items"])]
         self.history = SchemaHistory(self.root, "merge", self.signature({"local_key": local["key"]}))
         self.history.snapshot("input", [c["schema"] for c in candidates], mapping={"lineage": candidates, "sources": registry})
         print(f"SCHEMA_HISTORY={self.history.root}", flush=True)
@@ -356,6 +362,10 @@ class SchemaStages:
                              "sources": mapping, "checkpoints": sorted({p.relative_to(self.root).as_posix() for p in audit_paths}),
                              "review_status": "machine_generated_not_human_verified"}
                     write_json(self.root / "source-mapping.json", audit)
+                    concept_registry = build_concept_registry(value, mapping,
+                        read_json(self.p.dest / "manifest.json")["snapshot_id"], previous_registry)
+                    write_json(self.root / "concept-registry.json", concept_registry)
+                    write_json(shared_registry_path, concept_registry)
                     original_payload, _ = merge_payload(local["schemas"], self.p.profile)
                     mapped = MergeResponse(ontology=value, source_mapping=[
                         {"source_id": row["source_id"], "target_id": row["target_id"],
@@ -371,6 +381,7 @@ class SchemaStages:
                                "local_key": local["key"], "failed_tasks": 0, "selected_packs": len(local["selected"]),
                                "merge_settings": self.settings.public(), "merge_prompt_hash": digest(self.system),
                                "merge_format": MERGE_FORMAT, "source_mapping_hash": digest(audit),
+                               "concept_registry_hash": digest(concept_registry),
                                "total_packs": len(self.p.packs), "review_status": "pending_ai_review", "alignment_issues": len(findings)})
                     write_json(self.root / "review-status.json", {"state": "stale", "reason": "merge generated a draft", "updated_at": now()})
                     write_json(self.root / "merge-status.json", {"state": "success", "quality_state": "pending_ai_review",

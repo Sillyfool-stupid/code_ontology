@@ -15,10 +15,10 @@ from .repository import verify_sources
 from .util import canonical, digest, iter_jsonl, now, read_json, token_bound, unique, write_json, write_jsonl, write_text
 
 SCHEMA_CONTRACT = """JSON shape (all top-level arrays required):
-{"version":"0.1","profile":"","classes":[{"id":"c1","name":"Device","definition":"Equipment represented by source code","aliases":["Device"],"parents":[],"evidence_ids":["ev_..."]}],"relations":[{"id":"r1","name":"contains","definition":"Component membership","domain":["c1"],"range":["c1"],"evidence_ids":["ev_..."]}],"properties":[{"id":"p1","name":"identifier","definition":"Source identifier","domain":["c1"],"datatype":"string","unit":null,"evidence_ids":["ev_..."]}],"unresolved":[]}
+{"version":"0.1","profile":"","classes":[{"id":"c1","name":"Device","definition":"Equipment represented by source code","aliases":["Device"],"parents":[],"evidence_ids":["ev_..."]}],"relations":[{"id":"r1","name":"contains","definition":"Component membership","domain":["c1"],"range":["c1"],"min_count":null,"max_count":null,"evidence_ids":["ev_..."]}],"properties":[{"id":"p1","name":"identifier","definition":"Source identifier","domain":["c1"],"datatype":"string","unit":null,"min_count":null,"max_count":null,"evidence_ids":["ev_..."]}],"unresolved":[]}
 datatype is string/number/integer/boolean. Parents/domain/range reference declared class IDs. Empty arrays are valid. No extra keys."""
 EXTRACT_CONTRACT = """JSON shape (all top-level arrays required):
-{"entities":[{"id":"e1","name":"SourceEntity","type_id":"ID from schema","scope":"code_definition","basis":"direct","evidence_ids":["ev_..."]}],"relations":[{"subject":"e1","relation_id":"ID from schema","object":"e1","basis":"direct","evidence_ids":["ev_..."]}],"attributes":[{"subject":"e1","property_id":"ID from schema","value":"example","unit":null,"basis":"direct","evidence_ids":["ev_..."]}],"rules":[{"name":"ThresholdRule","condition":"Original condition and configuration constraints","action":"Action implemented in code","scope":"code_definition","basis":"direct","evidence_ids":["ev_..."]}],"candidates":[{"reason":"Why the item cannot fit the fixed schema","payload":{}}]}
+{"entities":[{"id":"e1","name":"SourceEntity","type_id":"ID from schema","scope":"code_definition","basis":"direct","evidence_ids":["ev_..."]}],"relations":[{"subject":"e1","relation_id":"ID from schema","object":"e1","basis":"direct","evidence_ids":["ev_..."]}],"attributes":[{"subject":"e1","property_id":"ID from schema","value":"example","unit":null,"basis":"direct","condition":null,"effective_time":null,"valid_from":null,"valid_to":null,"evidence_ids":["ev_..."]}],"rules":[{"name":"ThresholdRule","condition":"Original condition and configuration constraints","action":"Action implemented in code","scope":"code_definition","basis":"direct","effective_time":null,"evidence_ids":["ev_..."]}],"candidates":[{"reason":"Why the item cannot fit the fixed schema","payload":{}}]}
 scope is code_definition/configuration_record/test/example; basis is direct/inferred. Declare all entity endpoints in the same response. Empty arrays are valid. No extra keys."""
 
 # Keep the discovery prompt stable so a merge-only upgrade can reuse local manifests.
@@ -34,7 +34,7 @@ MERGE_CONTRACT = ("Return exactly this outer JSON shape (no extra keys):\n" + js
     "Different sources may share a target only when equivalent. For unresolved use target_id:null and explain the conflict; never omit a source. "
     "Every output item must have a mapped source. Output IDs may differ from input IDs. "
     "Ontology datatype is string/number/integer/boolean; parents/domain/range reference its declared class IDs. "
-    "Preserve mapped parents, relation direction/domain/range, property datatype/unit. "
+    "Preserve mapped parents, relation direction/domain/range/cardinality, property datatype/unit/cardinality. "
     "An integer/number conflict may safely widen to number, never narrow number to integer; keep other datatype/unit conflicts separate. "
     "All three categories support aliases. "
     "Use separate items when meanings differ; do not force a merge just to reduce item counts.")
@@ -491,6 +491,18 @@ class Pipeline:
                 else:
                     grouped[key]["evidence_ids"] = sorted(set(grouped[key]["evidence_ids"] + row["evidence_ids"]))
             final[category] = list(grouped.values())
+        for category, schema_items, key_field in (("relations", relations, "relation_id"),
+                                                   ("attributes", properties, "property_id")):
+            accepted, counts = [], defaultdict(int)
+            for row in final[category]:
+                key = (row["subject"], row[key_field])
+                spec = schema_items[row[key_field]]
+                if spec.max_count is not None and counts[key] >= spec.max_count:
+                    reject("schema_max_count_exceeded", row)
+                    continue
+                counts[key] += 1
+                accepted.append(row)
+            final[category] = accepted
         values = defaultdict(set)
         for a in final["attributes"]:
             values[(a["subject"], a["property_id"])].add(canonical([a["value"], a["unit"]]))
@@ -511,6 +523,7 @@ class Pipeline:
                    "prepared_packs": len(self.packs), "failures": len(self.errors),
                    "evidence_locatable_rate": 1.0 if assertions else None,
                    "evidence_note": "Source location validity only; semantic support still needs human review",
+                   "cardinality_note": "Explicit max_count is enforced per subject; min_count is not inferred from missing extraction evidence",
                    "elapsed_seconds": round(time.monotonic() - self.started, 3),
                    "llm": {key: sum(s.get(key, 0) for s in self.stage_stats + ([self._llm.stats] if self._llm else []))
                            for key in ("requests", "cache_hits", "retries", "repairs", "prompt_tokens", "completion_tokens")}}

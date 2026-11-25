@@ -154,10 +154,10 @@ def execute(step, session, settings, policy):
         if not index.is_file() or not graph.is_file():
             raise ValueError("Run normalize and prepare first")
         from .util import file_hash
-        from .prepare import __file__ as implementation
+        from .prepare import PREPARE_FORMAT, __file__ as implementation
         expected = digest({"source": read_json(dest / "manifest.json")["snapshot_id"], "view": view,
                            "policy": {k: policy[k] for k in ("pack_tokens", "neighbor_limit", "graph_nodes_per_pack")},
-                           "graph": read_json(graph).get("graph_fingerprint"), "implementation": file_hash(Path(implementation)), "format": 1})
+                           "graph": read_json(graph).get("graph_fingerprint"), "implementation": file_hash(Path(implementation)), "format": PREPARE_FORMAT})
         if read_json(index).get("key") != expected:
             raise ValueError("Evidence configuration changed; run prepare first")
         pipeline = Pipeline(dest, view, session["profile"], session["experiment"], settings, policy)
