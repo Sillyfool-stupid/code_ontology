@@ -24,6 +24,7 @@ from .prepare import __file__ as prepare_implementation
 from .util import canonical, digest, file_hash, now, read_json, within, write_json
 from .workbench_files import Preview, checked, listing
 from .events import read_events, redact
+from .execution_plan import build_stage_command
 
 STAGES = [
     ("doctor", "检查环境", False), ("connection", "测试模型连接", True),
@@ -400,42 +401,7 @@ class Workbench:
         return json.loads(text)
 
     def _command(self, stage, w, config, envfile, options):
-        args = [sys.executable, "-u", "-m", "code_ontology"]
-        common = (["--config", str(config)] if config else []) + ["--env-file", str(envfile)]
-        snap = w["snapshot"]
-        run = self.roots(w).get("run")
-        if stage in {"doctor", "connection"}:
-            return args + ["doctor", "--out", str(self.roots(w)["doctor"])] + common + (["--no-llm"] if stage == "doctor" else [])
-        if stage in {"scan", "parse", "experiment"}:
-            args += [stage, "--repo", w["repo"], "--out", w["out"]] + common
-            if stage == "parse":
-                args += ["--views", "ast,cfg,cpg"]
-                args[3] = "code_ontology.workbench_runner"
-                args += ["--expected-snapshot", w["snapshot"]]
-            if stage == "experiment":
-                args += ["--views", "ast,cfg,cpg", "--profile", "both", "--experiment", w["experiment"]]
-            return args
-        if stage == "prepare":
-            return args + [stage, "--snapshot", snap, "--view", w["view"]] + common
-        if stage in {"discover", "discover-local", "merge-schema", "review-schema", "finalize", "extract"}:
-            args += [stage, "--snapshot", snap, "--view", w["view"], "--profile", w["profile"], "--experiment", w["experiment"]] + common
-            if stage == "extract":
-                args += ["--defer-finalize", "--schema", str(run / "schema" / "schema.json"), "--require-current-schema"]
-            elif options.get("update_schema"):
-                args += ["--update-schema"]
-            return args
-        if stage == "validate":
-            return args + [stage, "--snapshot", snap, "--view", w["view"], "--run-dir", str(run)] + common
-        if stage == "evaluate":
-            return args + [stage, "--run-dir", str(run), "--gold", w["gold"]] + common
-        if stage == "report":
-            return args + [stage, "--snapshot", snap, "--experiment", w["experiment"]] + common
-        review = self.roots(w)["reviews"] / f"{w['view']}-{w['profile']}.csv"
-        if stage == "sample":
-            return [sys.executable, "-u", "-m", "code_ontology.review", "sample", "--run-dir", str(run), "--out", str(review), "--per-kind", "10", "--seed", "42"]
-        if stage == "summarize":
-            return [sys.executable, "-u", "-m", "code_ontology.review", "summarize", "--reviews", str(review), "--out", str(review.with_suffix(".summary.json"))]
-        raise ValueError("不支持的阶段")
+        return build_stage_command(stage, w, config, envfile, self.roots(w), options)
 
     def plan(self, wid, stage, options=None):
         if stage not in {x[0] for x in STAGES}:
