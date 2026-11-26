@@ -23,6 +23,14 @@
 - 不将普通 `run` 误当成已经执行了独立 `validate`、`evaluate` 或人工评审。完成后检查各自产物。
 - 正式评审标签由人工填写。Agent 可以提出核查建议，不能把自行推断的标签填成“已人工验证”。
 
+## Git 提交、合并与推送流程
+
+- 用户要求交付、合并到 `main` 并推送时，直接完成提交、合并和 `git push`，无需再次确认或创建 PR。此约定用于用户已授权的交付，不表示每次修改都自动发布。
+- 操作前检查 `git status --short`、`git branch -vv` 和 `git remote -v`；本项目 GitHub 远端为 `https://github.com/Sillyfool-stupid/code_ontology.git`。保留用户已有改动，仅暂存本次任务涉及的文件，不提交 `.env`、密钥、虚拟环境或运行输出。
+- 在功能分支完成相关检查及 `git diff --check` 后提交；执行 `git fetch origin`，切换 `main`，用 `git merge --ff-only origin/main` 同步远端，再合并本次功能分支。能快进时优先 `git merge --ff-only <功能分支>`；分支已分叉时正常合并并核查冲突，不强制覆盖。
+- 在 `main` 上直接执行 `git push`。若远端有新提交导致拒绝，先 fetch 并正常合并、解决冲突和完成必要检查，再重试；禁止为推送而使用强制推送或丢弃改动的 reset。
+- 推送后检查 `git status --branch --porcelain=v1`、`git rev-parse HEAD` 和 `git rev-parse origin/main`，确认提交一致，并向用户报告结果及提交号。推送失败时如实报告原因，不宣称已更新 GitHub。
+
 ## 代码导航
 
 | 模块 | 职责 |
