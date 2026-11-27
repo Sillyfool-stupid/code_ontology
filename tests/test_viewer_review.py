@@ -6,10 +6,12 @@ import threading
 import unittest
 from urllib.error import HTTPError
 from urllib.request import Request, urlopen
+from urllib.parse import urlencode
 
 from code_ontology.review import sample, summarize
 from code_ontology.util import file_hash, write_json, write_jsonl
 from code_ontology.viewer import ArtifactStore, make_server
+from code_ontology.workbench import WorkspaceArtifacts
 
 
 class ViewerReviewTests(unittest.TestCase):
@@ -89,7 +91,76 @@ class ViewerReviewTests(unittest.TestCase):
         write_json(history.root / "manifest.json", manifest)
         self.assertEqual(len(self.store.schema_history(self.rid)), 3)
 
+    def workspace_store(self):
+        return WorkspaceArtifacts({"out": str(self.root), "snapshot": str(self.snap),
+                                   "experiment": "demo", "view": "cpg", "profile": "maintenance"}, True)
+
+    def test_local_results_visible_before_manifest_merge_or_extraction(self):
+        (self.run / "run_manifest.json").unlink()
+        (self.run / "metrics.json").unlink()
+        (self.run / "final/schema.json").unlink()
+        write_json(self.run / "schema/local/first.json", {"key": "first", "schema": self.schema})
+        # A running task and a truncated checkpoint must not hide successful work.
+        write_json(self.run / "schema/local/second.task.json", {"state": "running"})
+        (self.run / "schema/local/broken.json").write_text('{"schema":', encoding="utf-8")
+        before = self.fingerprint()
+        store = self.workspace_store()
+        rows = store.listing()["runs"]
+        self.assertEqual(len(rows), 1)
+        detail = store.detail(rows[0]["id"])
+        self.assertEqual(detail["schema"]["classes"][0]["name"], "设备")
+        self.assertEqual(detail["schema_source"]["stage"], "local")
+        self.assertEqual(len(detail["schema_history"]), 1)
+        self.assertEqual(store.records(self.rid, "entities")["total"], 0)
+        self.assertTrue(store.evidence(self.rid, "ev1")["source_hash_matches"])
+        self.assertEqual(before, self.fingerprint())
+
+    def test_intermediate_sources_stay_separate_and_final_schema_is_preserved(self):
+        local = json.loads(json.dumps(self.schema))
+        local["classes"][0]["name"] = "局部设备"
+        write_json(self.run / "schema/local/first.json", {"schema": local})
+        write_json(self.run / "schema/module-schemas.json", {"schemas": [self.schema, local]})
+        write_json(self.run / "schema/merge/first.json", {"schema": self.schema, "source_mapping": []})
+        write_json(self.run / "schema/merge/second.candidate.json", local)
+        write_json(self.run / "schema/merge/second.task.json", {"state": "failed"})
+        store = self.workspace_store()
+        rows = store.listing()["runs"]
+        before = self.fingerprint()
+        detail = store.detail(rows[0]["id"])
+        sources = detail["schema_history"]
+        self.assertEqual(len(sources), 5)
+        self.assertEqual(detail["schema_source"]["stage"], "merge")
+        for source in sources:
+            snapshot = store.schema_snapshot(self.rid, source["path"])
+            self.assertEqual(len(snapshot["schema"]["classes"]), 1)
+            self.assertIn("device", snapshot["schema_record_ids"]["classes"])
+        fragments = [s for s in sources if s["state"] == "unaligned"]
+        self.assertEqual(len(fragments), 2)
+        self.assertNotEqual(store.schema_snapshot(self.rid, fragments[0]["path"])["schema"],
+                            store.schema_snapshot(self.rid, fragments[1]["path"])["schema"])
+        self.assertEqual(self.store.detail(self.rid)["schema"]["classes"][0]["name"], "设备")
+        for path in ("artifact:../evidence.jsonl", "artifact:local/../schema.json", "artifact:module-schemas.json#99"):
+            with self.assertRaises(KeyError):
+                store.schema_snapshot(self.rid, path)
+        self.assertEqual(before, self.fingerprint())
+
+    def test_history_only_failed_merge_and_legacy_local_manifest(self):
+        from code_ontology.schema_history import SchemaHistory
+        (self.run / "final/schema.json").unlink()
+        history = SchemaHistory(self.run / "schema", "merge", "partial")
+        history.snapshot("round-001/batch-001", [self.schema])
+        history.finish("partial", error="remaining batch failed")
+        store = self.workspace_store()
+        self.assertEqual(len(store.listing()["runs"]), 1)
+        detail = store.detail(self.rid)
+        self.assertEqual(detail["schema_source"]["attempt_state"], "partial")
+        write_json(self.run / "schema/local-manifest.json", {"state": "partial", "schemas": [self.schema]})
+        rows = store.schema_history(self.rid)
+        local = next(row for row in rows if row["stage"] == "local")
+        self.assertEqual(store.schema_snapshot(self.rid, local["path"])["schema"]["classes"][0]["id"], "device")
+
     def test_http_static_api_and_no_write_routes(self):
+        write_json(self.run / "schema/local/http-checkpoint.json", {"schema": self.schema})
         server = make_server(self.root, 0)
         thread = threading.Thread(target=server.serve_forever, daemon=True)
         thread.start()
@@ -105,6 +176,10 @@ class ViewerReviewTests(unittest.TestCase):
                 self.assertEqual(len(json.load(r)["runs"]), 1)
             with urlopen(base + "/api/records?id=" + self.rid + "&kind=entities&limit=1") as r:
                 self.assertEqual(json.load(r)["total"], 1)
+            with urlopen(base + "/api/schema-snapshot?" + urlencode({"id": self.rid, "path": "artifact:local/http-checkpoint.json"})) as r:
+                snapshot = json.load(r)
+                self.assertEqual(snapshot["schema_source"]["stage"], "local")
+                self.assertEqual(snapshot["schema"]["classes"][0]["name"], "设备")
             for path in ("/.env", "/api/run?id=../../", "/unknown"):
                 with self.assertRaises(HTTPError):
                     urlopen(base + path)

@@ -25,6 +25,8 @@ async function refresh(){
 async function selectRun(id){
   const d=await api("run",{id});if($("#run-select").value!==id)return;
   S.detail=d;S.run=d.run;S.snapshot=null;S.offset=0;S.detailEpoch++;
+  const requested=new URLSearchParams(location.search).get("schema");
+  if(requested){try{const snapshot=await api("schema-snapshot",{id,path:requested});if(S.run.id!==id)return;S.snapshot=snapshot;}catch(e){failure(e);}}
   const m=d.run.metrics;$("#model-label").textContent=`${d.run.model} · ${d.source.file_count} 个源码文件`;
   const status=$("#run-status");status.textContent=d.run.fixture?"模拟接口 · 不能评估质量":`${d.run.view.toUpperCase()} / ${d.run.profile} · ${d.run.status}`;
   status.className="tag"+(d.run.fixture||d.run.status!=="success"?" warn":"");
@@ -34,13 +36,14 @@ async function selectRun(id){
   if(d.schema_review?.state)notices.push(`AI 审查：${d.schema_review.state}；实例 Schema 来源：${d.schema_scope?.review_state||"尚未记录"}。`);
   notices.push(`发现阶段选择 ${d.discovery.selected} / ${d.discovery.total ?? "?"} 个证据包；实例阶段准备 ${d.prepared.packs ?? "?"} 个包。数量与证据可定位率不代表语义正确率。`);
   $("#notice").textContent=notices.join(" ");$("#notice").hidden=false;
-  $("#metrics").innerHTML=metric("业务概念",d.schema.classes.length,"固定 schema 中的类")+metric("关系类型",d.schema.relations.length,"概念间的关联定义")+metric("抽取实体",m.entities,"含代码 / 配置 / 示例范围")+metric("代码规则",m.rules,"条件与动作，待人工核验")+metric("候选 / 冲突",`${m.candidates ?? "—"} / ${m.conflicts ?? "—"}`,"保留歧义供后续复核")+metric("证据可定位率",m.evidence_locatable_rate==null?"—":`${Math.round(m.evidence_locatable_rate*100)}%`,"只表示引用可回查");
+  $("#metrics").innerHTML=metric("业务概念",d.schema.classes.length,"当前展示 Schema 中的类")+metric("关系类型",d.schema.relations.length,"概念间的关联定义")+metric("抽取实体",m.entities,"含代码 / 配置 / 示例范围")+metric("代码规则",m.rules,"条件与动作，待人工核验")+metric("候选 / 冲突",`${m.candidates ?? "—"} / ${m.conflicts ?? "—"}`,"保留歧义供后续复核")+metric("证据可定位率",m.evidence_locatable_rate==null?"—":`${Math.round(m.evidence_locatable_rate*100)}%`,"只表示引用可回查");
   await render();
 }
 async function render(){detailHistory.length=0;updateBack();
   const epoch=++S.epoch;const titles=pageTitles[S.page];$("#page-title").textContent=titles[0];$("#page-subtitle").textContent=titles[1];
   $$(".nav").forEach(n=>n.classList.toggle("active",n.dataset.page===S.page));
   if(!S.detail)return;
+  if(S.layer==="schema"){const schema=shownSchema().schema;const metrics=$$("#metrics strong");if(metrics[0])metrics[0].textContent=schema.classes.length;if(metrics[1])metrics[1].textContent=schema.relations.length;}
   if(S.page==="graph")await graphPage(epoch);
   if(S.page==="records")await recordsPage(epoch);
   if(S.page==="compare")comparePage();
@@ -49,6 +52,7 @@ async function render(){detailHistory.length=0;updateBack();
 }
 function detailPanel(){return '<aside class="panel"><div class="panel-head"><div><h2>条目与源码证据</h2><small>点击图中节点、关系或表格行</small></div></div><div id="detail-body" class="detail-placeholder"><div class="detail-icon">⌁</div>选择一个条目<br>查看定义、引用与源码位置</div></aside>';}
 function shownSchema(){return S.snapshot||S.detail;}
+function schemaVersionLabel(row){const stage={local:"局部抽取",merge:"合并",review:"AI 审查"}[row.stage]||row.stage;const state=row.state==="accepted"?"结构检查点 · 语义待确认":row.state==="unaligned"?"未对齐片段":"未校验候选";return `${stage} · ${row.location} · ${row.created_at||""} · ${state}${row.attempt_state==="partial"?" · 本轮合并/审查未完成":""}`;}
 function schemaRecord(kind,row){const context=shownSchema();return {record_id:context.schema_record_ids[kind][row.id],payload:row,kind:"schema."+kind,schema:context.schema};}
 function reviewKey(record){return `${S.run.id}/${record.record_id}`;}
 const detailHistory=[],pageHistory=[];
@@ -96,10 +100,11 @@ async function graphPage(epoch){
     const bar=document.createElement("div");bar.className="toolbar";
     const label=document.createElement("label");label.textContent="Schema 版本";label.htmlFor="schema-version";
     const select=document.createElement("select");select.id="schema-version";select.setAttribute("aria-label","选择 Schema 历史版本");select.style.maxWidth="85%";
-    const current=document.createElement("option");current.value="";current.textContent=new URLSearchParams(location.search).get("mode")==="schema"?"当前发现 Schema":"当前结果（实例抽取使用的 Schema）";select.append(current);
-    for(const row of S.detail.schema_history||[]){const option=document.createElement("option");option.value=row.path;option.textContent=`${row.stage==="merge"?"合并":"审查"} · ${row.created_at.slice(0,19)} · ${row.location} · ${row.path.split("/").pop()}${row.state!=="accepted"?" · 未校验候选":""}`;select.append(option);}
+    const current=document.createElement("option");current.value="";current.textContent=`默认展示 · ${S.detail.schema_source?.location||"当前 Schema"}`;select.append(current);
+    for(const row of S.detail.schema_history||[]){const option=document.createElement("option");option.value=row.path;option.textContent=schemaVersionLabel(row);select.append(option);}
     select.value=S.snapshot?.path||"";select.onchange=async()=>{try{const id=S.run.id,value=select.value;const data=value?await api("schema-snapshot",{id,path:value}):null;if(id!==S.run.id||select.value!==value)return;S.snapshot=data;await render();}catch(e){failure(e);}};
     bar.append(label,select);$("#graph-host").before(bar);
+    const source=document.createElement("p");source.className="graph-note";source.textContent=`当前来源：${shownSchema().schema_source?.location||"当前 Schema"}。局部和中间结果只代表该片段，不代表全局合并完成；未校验候选可能存在问题。`;bar.after(source);
   }
   let entities=[],relations=[],instanceTotal=0,relationTotal=0;
   if(S.layer==="instances"){

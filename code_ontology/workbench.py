@@ -11,7 +11,7 @@ from urllib.parse import parse_qs, urlsplit
 from .config import PROJECT
 from .console import configure_console
 from .util import canonical
-from .viewer import ASSETS as VIEWER_ASSETS, ArtifactStore, KINDS, record_id
+from .viewer import ASSETS as VIEWER_ASSETS, ArtifactStore, KINDS
 from .workbench_files import checked
 from .workbench_jobs import Conflict, Workbench
 
@@ -29,7 +29,8 @@ class WorkspaceArtifacts(ArtifactStore):
         w = self.workspace
         preferred = Path(w["snapshot"]) / "runs" / w["experiment"] / w["view"] / w["profile"] if w["snapshot"] else None
         if self.schema_only:
-            data["runs"] = [r for r in data["runs"] if (self.runs[r["id"]][0] / "schema/schema.json").is_file()]
+            data["runs"] = [r for r in data["runs"] if (self.runs[r["id"]][0] / "schema/schema.json").is_file()
+                            or self.schema_history(r["id"])]
         data["runs"].sort(key=lambda r: self.runs[r["id"]][0] != preferred)
         return data
 
@@ -38,13 +39,11 @@ class WorkspaceArtifacts(ArtifactStore):
         output, _, _ = self.locate(rid)
         current = self.load(output / "schema/schema.json")
         if self.schema_only:
-            schema = current or {"classes": [], "relations": [], "properties": [], "unresolved": []}
-            data["schema"] = schema
-            data["schema_record_ids"] = {kind: {r["id"]: record_id("schema." + kind, r) for r in schema.get(kind, [])}
-                                         for kind in ("classes", "relations", "properties")}
+            data.update(self.schema_context(rid, include_final=False))
             data["run"] = {**data["run"], "metrics": {}}
             data["validation"], data["evaluation"] = None, None
-            data["workbench_note"] = "当前展示 schema/schema.json 的发现结果；此模式不加载旧实例。完成 Schema 发现即可查看，无需先抽取实例。"
+            data["workbench_note"] = ("可选择局部抽取、合并批次和逐轮历史；各片段独立展示，不代表全局合并完成或语义已验证。"
+                                      "无需先抽取实例；此模式不加载旧实例。")
         elif current and current != data["schema"]:
             data["workbench_note"] = "当前发现 Schema 与 final/schema.json 不一致；此处展示与既有实例配套的最终 Schema。查看新发现结果请切换“当前发现 Schema”。"
         return data

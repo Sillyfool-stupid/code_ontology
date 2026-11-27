@@ -8,7 +8,7 @@ function browser(file, search='') {
   const element=()=>({value:'',hidden:false,textContent:'',innerHTML:'',dataset:{},
     classList:{add(){},toggle(){}},setAttribute(k,v){this[k]=v;},
     getAttribute(k){return this[k]??null;},removeAttribute(k){delete this[k];},
-    append(){},before(){},addEventListener(){},querySelectorAll(){return [];}});
+    append(){},replaceChildren(){},before(){},after(){},addEventListener(){},querySelectorAll(){return [];}});
   const document={querySelector(s){if(!nodes.has(s))nodes.set(s,element());return nodes.get(s);},
     querySelectorAll(){return [];},createElement:element,body:element()};
   const window={parent:{postMessage(data,origin){messages.push({data,origin});}},addEventListener(){}};
@@ -47,6 +47,21 @@ function browser(file, search='') {
   assert.equal(src.searchParams.get('mode'),'final');
   assert.equal(src.searchParams.get('run'),'selected-run');
   assert.equal(parent.run(`requests.every(r=>r.mode==='final')`),true);
+
+  // The selected intermediate fragment drives both the native list and iframe.
+  parent.run(`$('#ontology-mode').value='schema';
+    S.ontology.baseDetail={run:{id:'selected-run',metrics:{}},schema:{classes:[],relations:[],properties:[]}};
+    $('#ontology-schema').value='artifact:local/first.json';
+    ontologyApi=async(name,args)=>({schema:{classes:[{id:'local',name:'Local'}],relations:[],properties:[]},
+      schema_source:{location:'local/first.json'},path:args.path});`);
+  await parent.run('selectOntologySchema()');
+  assert.equal(parent.run('S.ontology.detail.schema.classes[0].id'),'local');
+  const intermediateSrc=new URL(parent.run(`$('#ontology-graph').src`),'http://localhost');
+  assert.equal(intermediateSrc.searchParams.get('schema'),'artifact:local/first.json');
+  assert.equal(intermediateSrc.searchParams.get('mode'),'schema');
+  parent.run(`$('#ontology-schema').value='';`);
+  await parent.run('selectOntologySchema()');
+  assert.equal(parent.run('S.ontology.detail.schema.classes.length'),0);
 
   // Final/standalone layer switches still render locally.
   for(const search of ['?embedded=1&mode=final','']){

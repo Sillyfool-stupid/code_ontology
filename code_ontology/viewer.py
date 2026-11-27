@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import argparse
+from datetime import datetime, timedelta, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import json
 from pathlib import Path
@@ -39,6 +40,8 @@ class ArtifactStore:
         # Also accept older completed runs that predate the run manifest.
         paths += sorted(self.root.rglob("metrics.json"))
         outputs = {p.parent for p in paths}
+        # Local discovery and interrupted merges need not have final metrics/schema.
+        outputs.update(p.parent for p in self.root.rglob("schema") if p.is_dir())
         runs, warnings, discovered = [], [], {}
         for output in outputs:
             try:
@@ -80,14 +83,11 @@ class ArtifactStore:
 
     def detail(self, rid):
         output, snap, item = self.locate(rid)
-        schema = self.load(output / "final" / "schema.json")
-        if schema is None:
-            schema = self.load(output / "schema" / "schema.json", {"classes": [], "relations": [], "properties": [], "unresolved": []})
+        context = self.schema_context(rid)
         manifest = self.load(snap / "manifest.json", {})
         prepare = self.load(snap / "prepared" / item["view"] / "index.json", {})
         selection = self.load(output / "schema" / "selection.json", {})
-        return {"run": {**item, "metrics": self.load(output / "metrics.json", {})}, "schema": schema,
-                "schema_record_ids": {kind: {row["id"]: record_id("schema." + kind, row) for row in schema.get(kind, [])} for kind in ("classes", "relations", "properties")},
+        return {"run": {**item, "metrics": self.load(output / "metrics.json", {})}, **context,
                 "stages": self.load(output / "run_manifest.json", {}).get("stages", {}),
                 "source": {"file_count": len(manifest.get("files", [])), "warnings": manifest.get("warnings", []),
                            "skipped_count": len(manifest.get("skipped", []))},
@@ -113,24 +113,93 @@ class ArtifactStore:
                         schema_path = path.parent / relative
                         if not within(schema_path, history) or not schema_path.is_file():
                             continue
+                        self.safe(schema_path)
                         rows.append({"path": schema_path.relative_to(history).as_posix(),
+                                     "file": schema_path.relative_to(output / "schema").as_posix(),
                                      "attempt": path.parent.name, "stage": manifest["stage"],
                                      "attempt_state": manifest["state"], "state": entry["state"],
                                      "location": entry["location"], "created_at": entry["created_at"]})
-            except (ValueError, OSError, KeyError):
+            except (ValueError, OSError, KeyError, TypeError, AttributeError):
                 continue
+        # Whitelisted, read-only legacy/checkpoint sources. Each fragment remains
+        # separate: concatenating schemas would silently collide local IDs.
+        root = self.safe(output / "schema")
+
+        def append_file(path, stage, wrapped=False, collection=False, state="accepted"):
+            try:
+                if not within(path, root):
+                    return
+                data = self.load(path)
+                values = data.get("schemas", []) if collection else [data.get("schema") if wrapped else data]
+                for index, schema in enumerate(values):
+                    if not isinstance(schema, dict) or not all(isinstance(schema.get(k), list) for k in ("classes", "relations", "properties")):
+                        continue
+                    relative = path.relative_to(root).as_posix()
+                    rows.append({"path": "artifact:" + relative + (f"#{index}" if collection else ""),
+                                 "file": relative, "index": index if collection else None, "wrapped": wrapped,
+                                 "stage": stage, "state": state, "attempt_state": "checkpoint",
+                                 "location": relative + (f" · 片段 {index + 1}" if collection else ""),
+                                 "created_at": datetime.fromtimestamp(path.stat().st_mtime, timezone(timedelta(hours=8))).isoformat()})
+            except (ValueError, OSError, KeyError, TypeError, AttributeError):
+                # Running/older outputs can contain unfinished JSON. Other results
+                # must remain inspectable; no files or stage states are rewritten.
+                return
+
+        for path in sorted((root / "local").glob("*.json")):
+            if not path.name.endswith((".task.json", ".candidate.json")):
+                append_file(path, "local", wrapped=True)
+        if not any(row["stage"] == "local" for row in rows):
+            append_file(root / "local-manifest.json", "local", collection=True)
+        append_file(root / "module-schemas.json", "merge", collection=True, state="unaligned")
+        for path in sorted((root / "merge").glob("*.json")):
+            if path.name.endswith(".task.json"):
+                continue
+            candidate = path.name.endswith(".candidate.json")
+            append_file(path, "merge", wrapped=not candidate,
+                        state="candidate_not_validated" if candidate else "accepted")
+        for path in sorted((root / "rounds").glob("*.json")):
+            append_file(path, "merge", collection=True)
         return rows
 
     def schema_snapshot(self, rid, relative):
         from .models import Ontology
         output, _, _ = self.locate(rid)
-        if relative not in {row["path"] for row in self.schema_history(rid)}:
+        entry = next((row for row in self.schema_history(rid) if row["path"] == relative), None)
+        if entry is None:
             raise KeyError("Unknown schema history snapshot")
-        path = output / "schema/history" / relative
-        schema = Ontology.model_validate(self.load(path)).model_dump()
-        return {"schema": schema, "path": relative,
+        data = self.load(output / "schema" / entry["file"])
+        if entry.get("index") is not None:
+            try:
+                data = data["schemas"][entry["index"]]
+            except (IndexError, TypeError, KeyError) as error:
+                raise KeyError("Schema fragment changed; refresh artifacts") from error
+        elif entry.get("wrapped"):
+            data = data["schema"]
+        schema = Ontology.model_validate(data).model_dump()
+        return {"schema": schema, "path": relative, "selected_snapshot": relative, "schema_source": entry,
                 "schema_record_ids": {kind: {row["id"]: record_id("schema." + kind, row)
                                      for row in schema[kind]} for kind in ("classes", "relations", "properties")}}
+
+    def schema_context(self, rid, include_final=True):
+        output, _, _ = self.locate(rid)
+        paths = (["final/schema.json"] if include_final else []) + ["schema/schema.json"]
+        for relative in paths:
+            schema = self.load(output / relative)
+            if schema is not None:
+                return {"schema": schema, "selected_snapshot": "", "schema_source": {"location": relative, "stage": "current", "state": "current"},
+                        "schema_record_ids": {kind: {row["id"]: record_id("schema." + kind, row) for row in schema.get(kind, [])}
+                                              for kind in ("classes", "relations", "properties")}}
+        rows = sorted(self.schema_history(rid), key=lambda row: (
+            row["state"] == "accepted" and row["stage"] != "local" and row["location"] != "input",
+            row["state"] == "accepted", row["created_at"]), reverse=True)
+        for row in rows:
+            try:
+                return self.schema_snapshot(rid, row["path"])
+            except (ValueError, OSError, KeyError, TypeError):
+                continue
+        return {"schema": {"classes": [], "relations": [], "properties": [], "unresolved": []},
+                "selected_snapshot": "", "schema_source": {"stage": "empty", "state": "empty", "location": "暂无可用 Schema"},
+                "schema_record_ids": {kind: {} for kind in ("classes", "relations", "properties")}}
 
     def records(self, rid, kind, offset=0, limit=50, query=""):
         if kind not in KINDS:
