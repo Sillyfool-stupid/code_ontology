@@ -25,6 +25,7 @@ from .util import canonical, digest, file_hash, now, read_json, within, write_js
 from .workbench_files import Preview, checked, listing
 from .events import read_events, redact
 from .execution_plan import build_stage_command
+from .workbench_config import POLICY_STEPS, StepConfigurations
 
 STAGES = [
     ("doctor", "检查环境", False), ("connection", "测试模型连接", True),
@@ -143,6 +144,8 @@ class Workbench:
             envfile = Path(fields.get("env_file") or self.project / ".env").resolve()
             policy = load_policy(str(config) if config else None, str(envfile))
             settings = load_settings(str(envfile), str(config) if config else None)
+            step_files = StepConfigurations(self.state, {"id": wid})
+            policy, settings = step_files.apply(policy, settings, step_files.read())
             info = snapshot_parser(Path(snap)) if snap else select_backend(policy, settings)
             if view not in info["available_views"]:
                 view = "ast"
@@ -154,14 +157,48 @@ class Workbench:
             self._save_workspace(w)
             return self.describe(wid)
 
-    def settings(self, w):
+    def base_settings(self, w):
         policy = load_policy(w["config"] or None, w["env_file"])
+        return policy, load_settings(w["env_file"], w["config"] or None)
+
+    def settings(self, w):
+        policy, settings = self.base_settings(w)
+        configs = StepConfigurations(self.state, w)
+        policy, settings = configs.apply(policy, settings, configs.read())
         # Exclude control files when the input repository contains the workbench itself.
         if within(self.state, Path(w["repo"])):
             relative = self.state.relative_to(Path(w["repo"])).as_posix()
             if relative and relative not in policy["exclude"]:
                 policy["exclude"] = [*policy["exclude"], relative]
-        return policy, load_settings(w["env_file"], w["config"] or None)
+        return policy, settings
+
+    def step_configurations(self, w):
+        policy, settings = self.base_settings(w)
+        sources = configuration_sources(w["env_file"], w["config"] or None)
+        return StepConfigurations(self.state, w).describe(policy, settings, sources)
+
+    def save_step_configuration(self, wid, stage, values, revision):
+        # Editing next-run files is safe while tasks run: submitted jobs own frozen copies.
+        with self.lock:
+            w = self.workspace(wid)
+            configs = StepConfigurations(self.state, w)
+            current = self.step_configurations(w).get(stage)
+            if current is None:
+                raise ValueError("此步骤请在关联步骤修改参数")
+            if revision != current["revision"]:
+                raise Conflict("配置或继承来源已变化，请重新读取后再保存；未覆盖已有文件")
+            values = configs.validate(stage, values)
+            policy, settings = self.base_settings(w)
+            overrides = configs.read()
+            overrides[stage] = values
+            configs.apply(policy, settings, overrides)
+            target = configs.path(stage)
+            target.parent.mkdir(parents=True, exist_ok=True)
+            # Replace only after validation, so polling cannot see half-written YAML.
+            temporary = target.with_suffix(".tmp")
+            temporary.write_text(yaml.safe_dump(values, allow_unicode=True, sort_keys=False), encoding="utf-8")
+            temporary.replace(target)
+            return self.describe(wid)
 
     def fingerprint(self, w, policy, settings, stage="experiment"):
         directory = Path(policy.get("prompt_dir") or RESOURCE / "prompts")
@@ -186,10 +223,15 @@ class Workbench:
         if stage in {"doctor", "connection"}:
             return digest({"stage": stage, "settings": settings.public(), "parser": select_backend(policy, settings)})
         if stage in {"scan", "parse"}:
-            return digest({"snapshot": w["snapshot"], "policy": {k: policy[k] for k in scan_keys}, "parser": select_backend(policy, settings), "joern_home": settings.joern_home})
+            return digest({"snapshot": w["snapshot"], "policy": {k: policy[k] for k in scan_keys}, "parser": select_backend(policy, settings), "joern_home": settings.joern_home,
+                           "parse_timeout": policy["joern_timeout"] if stage == "parse" else None})
         if stage == "prepare":
             return digest({**base, "graph": graph, "pack_policy": {k: policy[k] for k in pack_keys}})
         if stage in {"discover", "discover-local", "merge-schema", "review-schema", "finalize", "extract"}:
+            policy_keys = set(POLICY_STEPS.get("extract" if stage == "finalize" else stage, ()))
+            if stage == "discover":
+                policy_keys.update((*POLICY_STEPS["discover-local"], *POLICY_STEPS["merge-schema"]))
+            policy_keys.update(("output_language", "recovery_max_depth"))
             selected_prompts = {k: v for k, v in prompts.items() if k.startswith("common/") or k.startswith(w["profile"] + "/")}
             effective = settings.public()
             if stage in {"extract", "finalize", "discover-local", "merge-schema", "review-schema"}:
@@ -206,7 +248,7 @@ class Workbench:
                            "local": stamp(Path(w["snapshot"]) / "runs" / w["experiment"] / w["view"] / w["profile"] / "schema/local-manifest.json") if stage == "merge-schema" and w["snapshot"] else None,
                            "settings": effective, "output_language": policy["output_language"],
                            "prompts": selected_prompts, "pack_policy": {k:policy[k] for k in pack_keys},
-                           "discovery": [policy["discovery_max_packs"],policy["batch_packs"],policy["merge_max_rounds"],policy["discovery_strategy"]]})
+                           "step_policy": {k: policy[k] for k in sorted(policy_keys)}})
         if stage in {"validate", "evaluate", "report", "sample", "summarize"}:
             final = {p.name: stamp(p) for p in (run / "final").glob("*")} if run else {}
             reference = stamp(Path(w["gold"])) if stage == "evaluate" and w["gold"] else None
@@ -312,6 +354,7 @@ class Workbench:
         roots = self.roots(w)
         return {"workspace": w, "settings": settings.public(), "policy": policy, "parser": info, "fingerprint": fingerprint,
                 "stage_settings": {s: settings.for_stage(s).public() for s in ("discover", "merge", "review", "extract")},
+                "step_configurations": self.step_configurations(w),
                 "configuration_sources": configuration_sources(w["env_file"], w["config"] or None),
                 "stages": stages, "jobs": jobs, "roots": {k: str(v) for k, v in roots.items()},
                 "prompts": {stage: prompt(policy, w["profile"], stage) for stage in ("discover", "merge", "review", "extract")},
@@ -321,6 +364,8 @@ class Workbench:
         r = self.roots(w)
         snap, run = r.get("snapshot"), r.get("run")
         inputs = {"策略 YAML": w["config"], "模型环境文件（内容不预览）": w["env_file"]}
+        if stage in POLICY_STEPS:
+            inputs["网页步骤参数（优先，未保存则继承）"] = str(StepConfigurations(self.state, w).path(stage))
         if stage in {"scan", "parse", "experiment"}:
             inputs["输入仓库"] = w["repo"]
         if snap and stage not in {"doctor", "connection", "scan"}:
@@ -383,7 +428,7 @@ class Workbench:
     def attempt_file(self, jid, relative):
         job = self.job(jid)
         directory = Path(job["log"]).parent
-        allowed = {"task.json", "policy.yaml", "console.log", "input-schema.json", "metrics.json"}
+        allowed = {"task.json", "policy.yaml", "console.log", "input-schema.json", "metrics.json", "effective-config.json"}
         if relative not in allowed:
             raise ValueError("未知任务附件")
         env = self.environments.get(jid, {})
@@ -421,7 +466,9 @@ class Workbench:
         s = next(x for x in d["stages"] if x["id"] == stage)
         return {"stage": stage, "label": s["label"], "model": s["model"], "blocked": s["blocked"],
                 "command": self._command(stage, d["workspace"], d["workspace"]["config"], d["workspace"]["env_file"], options or {}),
-                "inputs": s["inputs"], "fingerprint": self.fingerprint(d["workspace"], d["policy"], load_settings(d["workspace"]["env_file"], d["workspace"]["config"] or None), stage),
+                "inputs": s["inputs"], "fingerprint": self.fingerprint(d["workspace"], d["policy"], self.settings(d["workspace"])[1], stage),
+                "configuration_revision": digest(d["step_configurations"]),
+                "effective_parameters": {"policy": d["policy"], "model_stages": d["stage_settings"]},
                 "note": "局部提取与合并可独立运行；实例抽取后执行归并实例产物。discover 是保留的组合入口。"}
 
     def submit(self, wid, stage, options=None):
@@ -435,6 +482,8 @@ class Workbench:
             if any(j["state"] == "interrupted" and not j.get("acknowledged") for j in self.jobs()):
                 raise Conflict("有异常中断任务。请检查残留进程后点击“确认已检查残留进程”解除阻塞")
             plan = self.plan(wid, stage, options)
+            if options.get("configuration_revision") and options["configuration_revision"] != plan["configuration_revision"]:
+                raise Conflict("步骤参数已在计划预览后变化，请重新查看执行计划")
             if plan["blocked"]:
                 raise ValueError("；".join(plan["blocked"]))
             w = self.workspace(wid)
@@ -450,6 +499,10 @@ class Workbench:
             policy["prompt_dir"] = str(frozen_prompts)
             config = directory / "policy.yaml"
             config.write_text(yaml.safe_dump(policy, allow_unicode=True), encoding="utf-8")
+            write_json(directory / "effective-config.json", {
+                "stage": stage, "created_at": now(), "policy": policy, "settings": settings.public(),
+                "step_configurations": self.step_configurations(w),
+                "base_sources": configuration_sources(w["env_file"], w["config"] or None)})
             command = self._command(stage, w, config, w["env_file"], options)
             if stage == "extract":
                 fixed = directory / "input-schema.json"
@@ -785,7 +838,7 @@ class Workbench:
         with self.lock:
             if any(j["state"] in ACTIVE for j in self.jobs(wid)):
                 raise Conflict("任务执行中不能切换提示词")
-            w = self.workspace(wid); policy, _ = self.settings(w)
+            w = self.workspace(wid); policy, _ = self.base_settings(w)
             from .config_bundle import read_bundle
             bundle = read_bundle(w.get("config"))
             target = self.state / "prompt-edits" / uuid.uuid4().hex[:12]

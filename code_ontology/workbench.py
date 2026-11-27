@@ -202,6 +202,7 @@ def make_server(state=None, port=8766, project=PROJECT, browse_roots=None):
                 elif path == "/api/cancel": result = service.cancel(d["id"])
                 elif path == "/api/acknowledge": result = service.acknowledge(d["id"])
                 elif path == "/api/prompt": result = service.prompt_copy(d["workspace"], d["stage"], d["text"])
+                elif path == "/api/step-configuration": result = service.save_step_configuration(d["workspace"], d["stage"], d["values"], d["revision"])
                 else: raise KeyError("未知写操作")
                 self.send(result)
             except Conflict as e:

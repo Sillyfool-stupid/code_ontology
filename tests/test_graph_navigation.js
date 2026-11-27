@@ -104,5 +104,23 @@ function browser(file, search='') {
   assert.match(stages.run(`$('#stages').innerHTML`),/data-stop="live-merge" disabled>停止中/);
   stages.run(`S.data.jobs[0].state='succeeded';render();`);
   assert.doesNotMatch(stages.run(`$('#stages').innerHTML`),/data-stop="live-merge"/);
-  console.log('Graph navigation and rendering checks passed');
+  // Drafts survive polling/stage switches and block execution until saved.
+  const configPage=browser('workbench');
+  configPage.run(`S.wid='workspace';S.stage='merge-schema';
+    S.data={workspace:{env_file:'shared.env',config:'base.yaml'},jobs:[],stages:[],step_configurations:{
+      'merge-schema':{revision:'r1',file:'merge.yaml',overrides:{policy:{},llm:{}},yaml:'policy: {}',
+        connection:{model:'fixture',base_url:'http://localhost'},fields:[
+          {section:'llm',key:'timeout',type:'number',label:'Timeout',help:'Wait',inherited:180,inherited_source:'shared.env'}]}}};
+    renderStepConfiguration(true);`);
+  assert.match(configPage.run(`$('#stage-config').innerHTML`),/shared.env/);
+  configPage.run(`let draft=stepDrafts.get('workspace:merge-schema');draft.values.llm.timeout='777';draft.dirty=true;
+    renderStepConfiguration(true);`);
+  assert.match(configPage.run(`$('#stage-config').innerHTML`),/value="777"/);
+  assert.throws(()=>configPage.run('assertSavedStepConfigurations()'),/尚未保存/);
+  configPage.run(`render=()=>{};api=async(name,args)=>{if(name==='step-configuration'){window.saved=args;return S.data;}return S.data;};`);
+  await configPage.run(`$('#save-step-config').onclick()`);
+  assert.equal(configPage.run('window.saved.values.llm.timeout'),777);
+  assert.equal(configPage.run('window.saved.revision'),'r1');
+  assert.doesNotThrow(()=>configPage.run('assertSavedStepConfigurations()'));
+  console.log('Graph navigation, configuration and rendering checks passed');
 })().catch(error=>{console.error(error);process.exitCode=1;});

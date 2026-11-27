@@ -85,6 +85,97 @@ class WorkbenchTests(unittest.TestCase):
         self.assertNotEqual(j["snapshot"], str(snap))
         self.assertIn("本次未运行解析器", self.service.logs(j["id"])["text"])
 
+    def save_step(self, stage, values):
+        revision = self.service.describe(self.wid)["step_configurations"][stage]["revision"]
+        return self.service.save_step_configuration(self.wid, stage, values, revision)
+
+    def test_web_step_overrides_environment_and_restores_inheritance(self):
+        with self.env.open("a", encoding="utf-8") as f:
+            f.write("LLM_MERGE_TIMEOUT_SECONDS=555\nCO_MERGE_BATCH_ITEMS=9\n")
+        before = self.env.read_bytes(), self.config.read_bytes()
+        original = self.service.describe(self.wid)
+        w = self.service.workspace(self.wid)
+        local_before = self.service.fingerprint(w, *self.service.settings(w), stage="discover-local")
+        merge_before = self.service.fingerprint(w, *self.service.settings(w), stage="merge-schema")
+        merged = self.save_step("merge-schema", {"policy": {"merge_batch_items": 3}, "llm": {"timeout": 777}})
+        self.assertEqual(merged["stage_settings"]["merge"]["timeout"], 777)
+        self.assertEqual(merged["policy"]["merge_batch_items"], 3)
+        self.assertEqual(merged["stage_settings"]["discover"], original["stage_settings"]["discover"])
+        self.assertEqual(self.service.fingerprint(w, *self.service.settings(w), stage="discover-local"), local_before)
+        self.assertNotEqual(self.service.fingerprint(w, *self.service.settings(w), stage="merge-schema"), merge_before)
+        config = merged["step_configurations"]["merge-schema"]
+        field = next(f for f in config["fields"] if f["key"] == "timeout")
+        self.assertEqual(field["inherited"], 555)
+        self.assertEqual(field["source"], config["file"])
+        self.assertEqual(yaml.safe_load(Path(config["file"]).read_text(encoding="utf-8")), config["overrides"])
+        restored = self.save_step("merge-schema", {})
+        self.assertEqual(restored["stage_settings"]["merge"]["timeout"], 555)
+        self.assertEqual(restored["policy"]["merge_batch_items"], 9)
+        self.assertEqual(before, (self.env.read_bytes(), self.config.read_bytes()))
+        other = self.service.save_workspace(self.fields)["workspace"]["id"]
+        self.assertNotEqual(other, self.wid)
+        self.assertFalse(Path(self.service.describe(other)["step_configurations"]["merge-schema"]["file"]).exists())
+
+    def test_web_step_validation_conflicts_and_no_credentials(self):
+        original = self.service.describe(self.wid)["step_configurations"]["merge-schema"]
+        for values in ({"llm": {"api_key": "forbidden"}}, {"llm": {"timeout": -1}},
+                       {"llm": {"concurrency": True}}, {"llm": {"context_tokens": 100}},
+                       {"policy": {"extract_batch_packs": 2}}, {"llm": {"timeout": float("nan")}}):
+            with self.assertRaises(ValueError):
+                self.service.save_step_configuration(self.wid, "merge-schema", values, original["revision"])
+        self.assertFalse(Path(original["file"]).exists())
+        self.save_step("merge-schema", {"llm": {"timeout": 800}})
+        with self.assertRaises(Conflict):
+            self.service.save_step_configuration(self.wid, "merge-schema", {}, original["revision"])
+        with self.assertRaises(ValueError):
+            self.service.save_step_configuration(self.wid, "../../outside", {}, "x")
+        self.assertNotIn(self.key, json.dumps(self.service.describe(self.wid)))
+        plan = self.service.plan(self.wid, "scan")
+        self.save_step("scan", {"policy": {"max_files": 1}})
+        with self.assertRaisesRegex(Conflict, "计划预览后变化"):
+            self.service.submit(self.wid, "scan", {"configuration_revision": plan["configuration_revision"]})
+        revision = self.service.describe(self.wid)["step_configurations"]["merge-schema"]["revision"]
+        with self.env.open("a", encoding="utf-8") as f:
+            f.write("LLM_MERGE_TIMEOUT_SECONDS=333\n")
+        with self.assertRaises(Conflict):
+            self.service.save_step_configuration(self.wid, "merge-schema", {}, revision)
+
+    def test_web_parser_override_used_when_resaving_workspace(self):
+        self.save_step("parse", {"policy": {"parser_backend": "tree-sitter"}})
+        changed = self.service.save_workspace({**self.fields, "id": self.wid, "view": "cpg"})
+        self.assertEqual(changed["workspace"]["view"], "ast")
+        self.assertEqual(changed["policy"]["parser_backend"], "tree-sitter")
+
+    def test_web_step_settings_reach_subprocess_and_do_not_change_running_job(self):
+        (self.repo / "second.cpp").write_text("int second;", encoding="utf-8")
+        self.save_step("scan", {"policy": {"max_files": 1}})
+        # Hold the worker at the existing queue lock while editing next-run settings.
+        with self.service.lock:
+            job = self.service.submit(self.wid, "scan")
+            frozen = read_json(Path(job["log"]).parent / "effective-config.json")
+            self.save_step("scan", {"policy": {"max_files": 2}})
+            self.assertEqual(frozen["policy"]["max_files"], 1)
+            self.assertEqual(read_json(Path(job["log"]).parent / "effective-config.json"), frozen)
+            self.assertEqual(self.service.describe(self.wid)["policy"]["max_files"], 2)
+        self.assertEqual(self.finish(job)["state"], "succeeded")
+        snap = Path(self.service.workspace(self.wid)["snapshot"])
+        self.assertEqual(len(read_json(snap / "manifest.json")["files"]), 1)
+
+    def test_web_model_step_settings_reach_requests_and_preserve_local_cache(self):
+        with fake_server() as (url, state):
+            self.env.write_text(f"OPENAI_BASE_URL={url}\nOPENAI_MODEL=fixture-only\nOPENAI_API_KEY={self.key}\n", encoding="utf-8")
+            self.run_stage("scan"); self.graph(); self.run_stage("prepare")
+            self.save_step("discover-local", {"llm": {"max_output_tokens": 512, "thinking": "disabled"}})
+            job = self.run_stage("discover-local")
+            self.assertEqual(state["payloads"][0]["max_tokens"], 512)
+            local_count = state["stage_counts"]["discover"]
+            self.save_step("merge-schema", {"llm": {"max_output_tokens": 1024}})
+            self.run_stage("merge-schema")
+            self.run_stage("discover-local")
+            self.assertEqual(state["stage_counts"]["discover"], local_count)
+            text = self.service.attempt_file(job["id"], "effective-config.json")["text"]
+            self.assertNotIn(self.key, text)
+
     def test_real_subprocess_stages_with_synthetic_api_and_resume(self):
         with fake_server() as (url, transport):
             self.env.write_text(f"OPENAI_BASE_URL={url}\nOPENAI_MODEL=fixture-only\nOPENAI_API_KEY={self.key}\n", encoding="utf-8")
@@ -334,6 +425,17 @@ class WorkbenchTests(unittest.TestCase):
                 result=json.load(r)
             wid=result['workspace']['id']
             self.assertNotIn(self.key,json.dumps(result))
+            step_payload = json.dumps({"workspace": wid, "stage": "merge-schema", "values": {"llm": {"timeout": 900}},
+                                       "revision": result["step_configurations"]["merge-schema"]["revision"]}).encode()
+            with self.assertRaises(HTTPError) as e:
+                urlopen(Request(base+'/api/step-configuration', data=step_payload))
+            self.assertEqual(e.exception.code, 403)
+            with urlopen(Request(base+'/api/step-configuration', data=step_payload, headers={"X-Workbench-Token": token})) as r:
+                saved = json.load(r)
+            self.assertEqual(saved["stage_settings"]["merge"]["timeout"], 900)
+            with self.assertRaises(HTTPError) as e:
+                urlopen(Request(base+'/api/step-configuration', data=step_payload, headers={"X-Workbench-Token": token}))
+            self.assertEqual(e.exception.code, 409)
             with patch.object(server.service, "cancel", side_effect=RuntimeError("process tree remains locked")):
                 with self.assertRaises(HTTPError) as e:
                     urlopen(Request(base+'/api/cancel',data=b'{"id":"fixture"}',headers={"X-Workbench-Token":token}))

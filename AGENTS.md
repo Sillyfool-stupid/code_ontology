@@ -14,6 +14,7 @@
 - Windows 用户偏好：先激活 `.venv`，之后使用 `python`；无需 `-X utf8`。识别 CMD、PowerShell、Linux shell，不能混用变量和激活语法。
 - Agent 的不同工具调用可能不共享 shell 环境；每个需要运行 Python 的新 shell 先激活环境。不要仅凭 `(.venv)` 字样判断解释器，检查 `sys.executable`。
 - 常用模型与策略统一读取 `.env`（CO_*、LLM_*）；YAML 保留可选兼容。优先级 CLI > 系统环境 > .env > YAML > 默认；提示词保留在 `code_ontology/resources/prompts/`。详见 [内网逐步脚本](docs/使用指南.md)。
+- 网页日常调参使用分阶段右侧“下次执行参数”，显式自定义优先于工作区基础配置；独立保存在 `.workbench/step-configs/<工作区ID>/`，不修改原 `.env`/YAML。普通 CLI/内网入口不自动读取此目录。任务实际生效值见任务附件 `effective-config.json`，运行中的任务不受之后保存影响。详见 [网页操作](docs/网页操作.md)。
 - 密钥不写入回答、文档、测试样例或提交；不要把整个 `.env` 打印到日志。使用用户指定的内网模型，不自动切换外网端点。
 - 输入仓库与已生成的 `source/` 快照保持原样；调整范围、配置或程序后由正常入口生成产物。不要手改正式结果来伪造通过。
 - 现有抽取流程与只读界面分离。用户仅要求展示、说明或排障时，不顺带改 schema/实例抽取逻辑。
