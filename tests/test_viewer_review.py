@@ -1,6 +1,7 @@
 from pathlib import Path
 import csv
 import json
+import os
 import tempfile
 import threading
 import unittest
@@ -94,6 +95,36 @@ class ViewerReviewTests(unittest.TestCase):
     def workspace_store(self):
         return WorkspaceArtifacts({"out": str(self.root), "snapshot": str(self.snap),
                                    "experiment": "demo", "view": "cpg", "profile": "maintenance"}, True)
+
+    def test_schema_versions_follow_time_across_sources_and_timezones(self):
+        from datetime import datetime
+        from code_ontology.schema_history import SchemaHistory
+
+        history = SchemaHistory(self.run / "schema", "merge", "chronology")
+        history.snapshot("later", [self.schema])
+        history.snapshot("earlier", [self.schema])
+        history.snapshot("missing-time", [self.schema])
+        manifest = history.manifest
+        # Lexical timestamp order differs from actual instant order.
+        for entry, stamp in zip(manifest["snapshots"],
+                                ["2026-11-27T01:00:00Z", "2026-11-27T08:30:00+08:00", "invalid"]):
+            entry["created_at"] = stamp
+        write_json(history.root / "manifest.json", manifest)
+        local = self.run / "schema/local/z-first.json"
+        write_json(local, {"schema": self.schema})
+        earliest = datetime.fromisoformat("2026-11-27T08:00:00+08:00").timestamp()
+        os.utime(local, (earliest, earliest))
+        missing = history.root / manifest["snapshots"][2]["schemas"][0]
+        os.utime(missing, (earliest, earliest))
+        before = self.fingerprint()
+        rows = self.store.schema_history(self.rid)
+        self.assertEqual([row["location"] for row in rows],
+                         ["local/z-first.json", "missing-time", "earlier", "later"])
+        self.assertEqual(rows, self.store.schema_history(self.rid))
+        # Reading and sorting never rewrites the saved artifacts.
+        self.assertEqual(before, self.fingerprint())
+        (self.run / "final/schema.json").unlink()
+        self.assertEqual(self.store.schema_context(self.rid)["schema_source"]["location"], "later")
 
     def test_local_results_visible_before_manifest_merge_or_extraction(self):
         (self.run / "run_manifest.json").unlink()

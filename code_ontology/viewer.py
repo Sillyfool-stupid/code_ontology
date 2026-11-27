@@ -19,6 +19,17 @@ def record_id(kind: str, row: dict) -> str:
     return kind + ":" + digest(row, 32)
 
 
+def schema_version_time(row):
+    """Compare version instants across old UTC and Beijing timestamp formats."""
+    try:
+        value = datetime.fromisoformat(row["created_at"].replace("Z", "+00:00"))
+        if value.tzinfo is None:
+            value = value.replace(tzinfo=timezone(timedelta(hours=8)))
+        return value.timestamp()
+    except (ValueError, TypeError, KeyError, AttributeError, OverflowError, OSError):
+        return float("inf")
+
+
 class ArtifactStore:
     def __init__(self, root: Path):
         self.root = root.resolve()
@@ -159,7 +170,12 @@ class ArtifactStore:
                         state="candidate_not_validated" if candidate else "accepted")
         for path in sorted((root / "rounds").glob("*.json")):
             append_file(path, "merge", collection=True)
-        return rows
+        for row in rows:
+            if schema_version_time(row) == float("inf"):
+                row["created_at"] = datetime.fromtimestamp(
+                    self.safe(root / row["file"]).stat().st_mtime,
+                    timezone(timedelta(hours=8))).isoformat()
+        return sorted(rows, key=lambda row: (schema_version_time(row), row["path"]))
 
     def schema_snapshot(self, rid, relative):
         from .models import Ontology
@@ -191,7 +207,7 @@ class ArtifactStore:
                                               for kind in ("classes", "relations", "properties")}}
         rows = sorted(self.schema_history(rid), key=lambda row: (
             row["state"] == "accepted" and row["stage"] != "local" and row["location"] != "input",
-            row["state"] == "accepted", row["created_at"]), reverse=True)
+            row["state"] == "accepted", schema_version_time(row)), reverse=True)
         for row in rows:
             try:
                 return self.schema_snapshot(rid, row["path"])
