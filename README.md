@@ -2,7 +2,7 @@
 
 ## 文档入口
 
-现有功能整理为 6 份使用与维护文档，另有一份后续改进想法，按任务选择：
+完整目录与近期功能入口见 [docs 文档导航](docs/README.md)。日常使用与维护按任务选择：
 
 | 文档 | 什么时候看 |
 |---|---|
@@ -18,7 +18,7 @@
 
 输入 C/C++ 仓库，经过源码快照、Joern AST/CFG/CPG 或 Tree-sitter AST、证据包、局部 Schema 发现、独立合并与 AI 审查修正，再抽取实体、关系、属性和规则。最终交付 JSON/JSONL、报告和可回查源码的网页。支持 general 与 maintenance 两套提示词，中英文可混合保留。
 
-常用参数集中在 `.env`，日常推荐 `scripts\intranet.bat`，合并、AI 审查与实例归并可以单独执行和恢复。合并先输出草稿和问题；每轮每批的 Schema 保存于 `schema/history/`，只读网页可选择版本对照。Tree-sitter 不依赖 Joern/Java，仅提供语法 AST；完整 CMake 求值、全仓数据流推理、RDF/OWL 和图数据库未实现。
+常用参数集中在 `.env`，日常推荐 `scripts\intranet.bat`，合并、AI 审查与实例归并可以单独执行和恢复。合并先输出草稿和问题；每轮每批的 Schema 保存于 `schema/history/`，只读网页可选择版本对照。Tree-sitter 不依赖 Joern/Java，仅提供语法 AST；归并后可独立导出 RDF/OWL、SHACL 校验及来源记录，不调用模型；完整 CMake 求值、全仓数据流推理和图数据库集成仍未实现。
 
 **网页工作台**（执行阶段任务）：
 
